@@ -233,8 +233,7 @@ class App:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("ZMDset — 小队装备管理")
-        self.root.geometry("1100x680")
-        self.root.minsize(900, 550)
+        self.root.minsize(800, 500)
 
         # ---------- 加载配置 ----------
         config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "set.config")
@@ -267,6 +266,19 @@ class App:
             self._refresh_summary()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # 根据内容自动调整窗口大小
+        self.root.update_idletasks()
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        req_w = self.root.winfo_reqwidth()
+        req_h = self.root.winfo_reqheight()
+        w = min(req_w + 40, int(screen_w * 0.9))
+        h = min(req_h + 40, int(screen_h * 0.85))
+        x = (screen_w - w) // 2
+        y = (screen_h - h) // 2
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
+
         self.root.mainloop()
 
     # ---- UI 构建 -------------------------------------------------
@@ -328,20 +340,39 @@ class App:
 
         # --- 右侧：队员装备详情（双行网格） ---
         right_frame = ttk.LabelFrame(top_pw, text="队员装备详情（点击左侧小队名查看）", padding=5)
-        top_pw.add(right_frame, weight=2)
+        top_pw.add(right_frame, weight=3)
 
         # 使用 Canvas + 内部 Frame 实现可滚动的表格
         self._detail_canvas = tk.Canvas(right_frame, highlightthickness=0)
-        detail_scroll = ttk.Scrollbar(right_frame, orient=tk.VERTICAL, command=self._detail_canvas.yview)
+        detail_scroll_y = ttk.Scrollbar(right_frame, orient=tk.VERTICAL, command=self._detail_canvas.yview)
+        detail_scroll_x = ttk.Scrollbar(right_frame, orient=tk.HORIZONTAL, command=self._detail_canvas.xview)
         self._detail_grid = ttk.Frame(self._detail_canvas)
 
-        self._detail_grid.bind("<Configure>",
-            lambda e: self._detail_canvas.configure(scrollregion=self._detail_canvas.bbox("all")))
-        self._detail_canvas.create_window((0, 0), window=self._detail_grid, anchor="nw")
-        self._detail_canvas.configure(yscrollcommand=detail_scroll.set)
+        self._detail_win = self._detail_canvas.create_window((0, 0), window=self._detail_grid, anchor="nw")
+        self._detail_canvas.configure(yscrollcommand=detail_scroll_y.set, xscrollcommand=detail_scroll_x.set)
 
-        self._detail_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        detail_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._detail_canvas.grid(row=0, column=0, sticky="nsew")
+        detail_scroll_y.grid(row=0, column=1, sticky="ns")
+        detail_scroll_x.grid(row=1, column=0, columnspan=2, sticky="ew")
+
+        # grid 权重：Canvas 区可拉伸，滚动条固定
+        right_frame.grid_rowconfigure(0, weight=1)
+        right_frame.grid_columnconfigure(0, weight=1)
+
+        # 防抖：Canvas 大小变化时，内部 Frame 宽度取 max(最小宽度, Canvas 宽度)
+        self._detail_resize_id = None
+        self._detail_min_width = 760  # 表格最小像素宽度
+        def _on_canvas_resize(event):
+            if self._detail_resize_id is not None:
+                self.root.after_cancel(self._detail_resize_id)
+            def _apply():
+                self._detail_resize_id = None
+                new_w = max(self._detail_min_width, event.width)
+                self._detail_canvas.itemconfig(self._detail_win, width=new_w)
+                self._detail_canvas.configure(scrollregion=self._detail_canvas.bbox("all"))
+            self._detail_resize_id = self.root.after(80, _apply)
+        self._detail_canvas.bind("<Configure>", _on_canvas_resize)
+
         # 鼠标滚轮
         self._detail_canvas.bind("<Enter>", lambda e: self._detail_canvas.bind_all("<MouseWheel>",
             lambda ev: self._detail_canvas.yview_scroll(int(-1 * (ev.delta / 120)), "units")))
@@ -437,13 +468,12 @@ class App:
 
         gear_list = self.config.get_team_gear_list(team_name)
         cols = ("序号", "角色", "套装", "护甲", "护手", "配件1", "配件2")
-        col_widths = (50, 80, 90, 130, 130, 140, 140)
 
         # ---------- 表头 ----------
         header_font = ("Microsoft YaHei UI", 9, "bold")
-        for ci, (col, cw) in enumerate(zip(cols, col_widths)):
+        for ci, col in enumerate(cols):
             lbl = tk.Label(self._detail_grid, text=col, font=header_font,
-                           bg="#e0e0e0", relief="ridge", borderwidth=1, width=cw // 7)
+                           bg="#e0e0e0", relief="ridge", borderwidth=1)
             lbl.grid(row=0, column=ci, sticky="nsew", padx=0, pady=0)
 
         # ---------- 数据行（每角色2行） ----------
@@ -458,17 +488,15 @@ class App:
             for ci, val in enumerate(name_values):
                 bg = "#f5f5f5" if ci < 3 else "#ffffff"
                 fg = "black"
-                # 角色基础信息列：合并显示两行
                 if ci < 3:
                     lbl = tk.Label(self._detail_grid, text=str(val), bg=bg, fg=fg,
                                    relief="ridge", borderwidth=1, anchor="center")
                     lbl.grid(row=char_row, column=ci, rowspan=2, sticky="nsew", padx=0, pady=0)
                 else:
-                    # 上行：装备名
                     lbl_name = tk.Label(self._detail_grid, text=str(val), bg=bg, fg=fg,
-                                        relief="ridge", borderwidth=1, anchor="center")
+                                        relief="ridge", borderwidth=1, anchor="center",
+                                        wraplength=100, justify="center")
                     lbl_name.grid(row=char_row, column=ci, sticky="nsew", padx=0, pady=0)
-                    # 下行：推荐属性
                     stats = self.config.get_stats_display(str(val))
                     stat_color = "gray" if stats == "暂缺" else "#0066cc"
                     stat_font = ("Consolas", 9, "bold") if stats != "暂缺" else ("Microsoft YaHei UI", 8)
@@ -497,8 +525,11 @@ class App:
                                anchor="w", justify="left")
             cmt_lbl.grid(row=row_offset, column=0, columnspan=len(cols), sticky="w", padx=8, pady=(2, 4))
 
-        # 重置画布滚动位置
+        # 更新 scrollregion 并重置滚动位置
+        self._detail_grid.update_idletasks()
+        self._detail_canvas.configure(scrollregion=self._detail_canvas.bbox("all"))
         self._detail_canvas.yview_moveto(0)
+        self._detail_canvas.xview_moveto(0)
 
     def _refresh_summary(self):
         """刷新底部装备汇总（含已有对比，绿底满足 / 红底不足）"""
