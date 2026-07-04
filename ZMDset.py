@@ -375,6 +375,7 @@ class App:
         btn_frame.pack(fill=tk.X, pady=(0, 5))
         ttk.Button(btn_frame, text="全选", command=self._select_all).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="全不选", command=self._select_none).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="🔄 刷新", command=self._reload_config).pack(side=tk.RIGHT, padx=2)
 
         # 可滚动的小队列表
         list_container = ttk.Frame(left_frame)
@@ -525,6 +526,42 @@ class App:
     def _select_none(self):
         for var in self.team_vars.values():
             var.set(False)
+        self._refresh_summary()
+
+    def _reload_config(self):
+        """重新加载 setConfig.json 并刷新全部界面"""
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "setConfig.json")
+        try:
+            self.config = ConfigLoader(config_path)
+            self.calculator = GearCalculator(self.config)
+        except FileNotFoundError as e:
+            tk.messagebox.showerror("错误", str(e))
+            return
+
+        # 记录之前的勾选状态
+        prev_state = {tn: var.get() for tn, var in self.team_vars.items()}
+
+        # 重建左侧小队列表
+        for w in self._team_inner.winfo_children():
+            w.destroy()
+        self.team_vars.clear()
+        self.team_widgets.clear()
+        for team_name in self.config.teams:
+            self._add_team_checkbox(team_name)
+            if prev_state.get(team_name):
+                self.team_vars[team_name].set(True)
+
+        # 更新右侧和底部
+        if self._displayed_team in self.config.teams:
+            self._refresh_detail(self._displayed_team)
+        elif self.config.teams:
+            first = list(self.config.teams.keys())[0]
+            self._displayed_team = first
+            self._highlight_team(first)
+            self._refresh_detail(first)
+        else:
+            for w in self._detail_grid.winfo_children():
+                w.destroy()
         self._refresh_summary()
 
     # ---- 刷新视图 -------------------------------------------------
