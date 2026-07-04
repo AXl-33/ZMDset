@@ -59,14 +59,12 @@ class CharacterGear:
 
 class TeamComposition:
     """一支小队由4个成员组成"""
-    __slots__ = ('name', 'members')
+    __slots__ = ('name', 'members', 'comment')
 
-    def __init__(self, name, members):
-        """
-        members: [(char_name, set_name), ...]  长度为4
-        """
+    def __init__(self, name, members, comment=""):
         self.name = name
-        self.members = members  # [(char_name, set_name), ...]
+        self.members = members
+        self.comment = comment
 
     def count_gear(self, gear_dict):
         """
@@ -115,14 +113,28 @@ class ConfigLoader:
                 self.char_gear[gear.key] = gear
                 self.char_sets[char_name].append(set_name)
 
-        # 解析小队
-        for team_name, members in data.get("teams", {}).items():
+        # 解析小队（支持新旧两种格式）
+        for team_name, team_data in data.get("teams", {}).items():
+            comment = ""
+            if isinstance(team_data, dict):
+                # 新格式: {"members": [...], "comment": "..."}
+                members_raw = team_data.get("members", [])
+                comment = team_data.get("comment", "")
+            elif isinstance(team_data, list):
+                # 旧格式: [{character, set}, ...]
+                members_raw = team_data
+            else:
+                continue
+
             member_list = []
-            for m in members:
+            for m in members_raw:
+                if "comment" in m:
+                    # 数组内的 comment 占位项
+                    continue
                 char_name = m.get("character", "")
                 set_name = m.get("set", "默认")
                 member_list.append((char_name, set_name))
-            self.teams[team_name] = TeamComposition(team_name, member_list)
+            self.teams[team_name] = TeamComposition(team_name, member_list, comment)
 
         # 解析已有装备
         for gear_name, stats in data.get("equipment", {}).items():
@@ -473,6 +485,17 @@ class App:
         # 设置列权重，让内容撑开
         for ci in range(len(cols)):
             self._detail_grid.grid_columnconfigure(ci, weight=1)
+
+        # ---------- 小队备注（最末行） ----------
+        team = self.config.teams.get(team_name)
+        if team and team.comment:
+            sep_final = ttk.Separator(self._detail_grid, orient="horizontal")
+            sep_final.grid(row=row_offset, column=0, columnspan=len(cols), sticky="ew", pady=(4, 2))
+            row_offset += 1
+            cmt_lbl = tk.Label(self._detail_grid, text=f"📝 {team.comment}",
+                               fg="#555555", font=("Microsoft YaHei UI", 9, "italic"),
+                               anchor="w", justify="left")
+            cmt_lbl.grid(row=row_offset, column=0, columnspan=len(cols), sticky="w", padx=8, pady=(2, 4))
 
         # 重置画布滚动位置
         self._detail_canvas.yview_moveto(0)
