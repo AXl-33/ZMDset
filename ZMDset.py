@@ -1,0 +1,532 @@
+# -*- coding: utf-8 -*-
+"""
+ZMDset - 小队装备管理工具
+
+功能：
+  - 左侧勾选可能上场的小队方案
+  - 右侧展示选中队伍4人的详细装备
+  - 底部汇总所有方案所需装备的总数
+  - 同一小队内重复装备会按实际数量统计
+  - 不同小队只取各装备需求的最大值（同一时间仅一队上场）
+
+配置文件格式（set.config）—— JSON:
+  {
+    "characters": {
+      "角色名": [{ "set": "套装名", "armor": "护甲", "gauntlet": "护手",
+                    "accessory1": "配件1", "accessory2": "配件2" }, ...],
+      ...
+    },
+    "teams": {
+      "小队名": [{ "character": "角色名", "set": "套装名" }, ...  (4名成员) ],
+      ...
+    }
+  }
+"""
+
+import json
+import os
+import sys
+import tkinter as tk
+from tkinter import ttk
+from collections import Counter, defaultdict
+
+
+# ============================================================
+#  配置解析模块
+# ============================================================
+
+class CharacterGear:
+    """单个角色的一套装备"""
+    __slots__ = ('char_name', 'set_name', 'armor', 'gauntlet', 'acc1', 'acc2')
+
+    def __init__(self, char_name, set_name, armor, gauntlet, acc1, acc2):
+        self.char_name = char_name
+        self.set_name = set_name
+        self.armor = armor
+        self.gauntlet = gauntlet
+        self.acc1 = acc1
+        self.acc2 = acc2
+
+    @property
+    def all_gear(self):
+        """返回该角色的所有装备列表"""
+        return [self.armor, self.gauntlet, self.acc1, self.acc2]
+
+    @property
+    def key(self):
+        return (self.char_name, self.set_name)
+
+
+class TeamComposition:
+    """一支小队由4个成员组成"""
+    __slots__ = ('name', 'members')
+
+    def __init__(self, name, members):
+        """
+        members: [(char_name, set_name), ...]  长度为4
+        """
+        self.name = name
+        self.members = members  # [(char_name, set_name), ...]
+
+    def count_gear(self, gear_dict):
+        """
+        统计该小队的装备需求（考虑队内重复）
+        gear_dict: {(char_name, set_name): CharacterGear}
+        返回 Counter {装备名: 数量}
+        """
+        counts = Counter()
+        for member_key in self.members:
+            if member_key in gear_dict:
+                for g in gear_dict[member_key].all_gear:
+                    counts[g] += 1
+        return counts
+
+
+class ConfigLoader:
+    """加载并解析 set.config 文件"""
+
+    def __init__(self, filepath="set.config"):
+        self.filepath = filepath
+        self.char_gear = {}       # {(char_name, set_name): CharacterGear}
+        self.char_sets = defaultdict(list)  # {char_name: [set_name, ...]}
+        self.teams = {}           # {team_name: TeamComposition}
+        self.owned_equipment = {} # {装备名: (a, b, c)}
+        self._parse()
+
+    def _parse(self):
+        if not os.path.exists(self.filepath):
+            raise FileNotFoundError(f"配置文件不存在: {self.filepath}")
+
+        with open(self.filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        # 解析角色装备
+        for char_name, sets in data.get("characters", {}).items():
+            for gear_data in sets:
+                set_name = gear_data.get("set", "默认")
+                gear = CharacterGear(
+                    char_name,
+                    set_name,
+                    gear_data.get("armor", ""),
+                    gear_data.get("gauntlet", ""),
+                    gear_data.get("accessory1", ""),
+                    gear_data.get("accessory2", ""),
+                )
+                self.char_gear[gear.key] = gear
+                self.char_sets[char_name].append(set_name)
+
+        # 解析小队
+        for team_name, members in data.get("teams", {}).items():
+            member_list = []
+            for m in members:
+                char_name = m.get("character", "")
+                set_name = m.get("set", "默认")
+                member_list.append((char_name, set_name))
+            self.teams[team_name] = TeamComposition(team_name, member_list)
+
+        # 解析已有装备
+        for gear_name, stats in data.get("equipment", {}).items():
+            a = stats.get("a", 0)
+            b = stats.get("b", 0)
+            c = stats.get("c", 0)
+            self.owned_equipment[gear_name] = (a, b, c)
+
+    def get_best_stats(self, gear_name):
+        """获取某装备的最佳属性值字符串，如 '653'；没有则返回 None"""
+        stats = self.owned_equipment.get(gear_name)
+        if stats is None:
+            return None
+        return f"{stats[0]}{stats[1]}{stats[2]}"
+
+    def get_stats_display(self, gear_name):
+        """获取推荐属性展示文本：有→'653'，无→'暂缺'"""
+        s = self.get_best_stats(gear_name)
+        return s if s else "暂缺"
+
+    def count_owned(self, gear_name):
+        """检查是否拥有某装备（拥有 >= 1 件即可）"""
+        return 1 if gear_name in self.owned_equipment else 0
+
+    def get_team_gear_list(self, team_name):
+        """获取小队每个成员的装备详情，用于右侧展示"""
+        team = self.teams.get(team_name)
+        if not team:
+            return []
+        result = []
+        for idx, (char_name, set_name) in enumerate(team.members, 1):
+            key = (char_name, set_name)
+            gear = self.char_gear.get(key)
+            if gear:
+                result.append({
+                    "序号": idx,
+                    "角色": char_name,
+                    "套装": set_name,
+                    "护甲": gear.armor,
+                    "护手": gear.gauntlet,
+                    "配件1": gear.acc1,
+                    "配件2": gear.acc2,
+                })
+            else:
+                result.append({
+                    "序号": idx,
+                    "角色": char_name,
+                    "套装": f"{set_name}(未定义)",
+                    "护甲": "—",
+                    "护手": "—",
+                    "配件1": "—",
+                    "配件2": "—",
+                })
+        return result
+
+
+# ============================================================
+#  装备计算模块
+# ============================================================
+
+class GearCalculator:
+    """计算装备总需求"""
+
+    def __init__(self, config: ConfigLoader):
+        self.config = config
+
+    def calculate(self, selected_teams):
+        """
+        计算所选小队的装备总需求。
+        规则：同时只上一队，所以不同小队取各装备需求的最大值。
+        同一小队内部重复装备如实计数。
+        返回: Counter {装备名: 数量}
+        """
+        if not selected_teams:
+            return Counter()
+
+        overall = Counter()
+        for team_name in selected_teams:
+            team = self.config.teams.get(team_name)
+            if not team:
+                continue
+            team_counts = team.count_gear(self.config.char_gear)
+            for gear_name, count in team_counts.items():
+                if count > overall.get(gear_name, 0):
+                    overall[gear_name] = count
+        return overall
+
+
+# ============================================================
+#  GUI 主界面
+# ============================================================
+
+class App:
+    """主应用程序"""
+
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("ZMDset — 小队装备管理")
+        self.root.geometry("1100x680")
+        self.root.minsize(900, 550)
+
+        # ---------- 加载配置 ----------
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "set.config")
+        try:
+            self.config = ConfigLoader(config_path)
+        except FileNotFoundError as e:
+            tk.messagebox.showerror("错误", str(e))
+            sys.exit(1)
+
+        self.calculator = GearCalculator(self.config)
+
+        # 当前在右侧展示的小队名
+        self._displayed_team = None
+
+        # ---------- 变量 ----------
+        self.team_vars = {}  # team_name -> tk.BooleanVar（是否勾选）
+        self.team_widgets = {}  # team_name -> (frame, checkbutton) 用于高亮
+
+        # ---------- 构建界面 ----------
+        self._build_ui()
+
+        # ---------- 初始选中第一队 ----------
+        if self.config.teams:
+            first_team = list(self.config.teams.keys())[0]
+            self.team_vars[first_team].set(True)
+            self._on_team_toggle(first_team)
+            self._highlight_team(first_team)
+            self._displayed_team = first_team
+            self._refresh_detail(first_team)
+            self._refresh_summary()
+
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.mainloop()
+
+    # ---- UI 构建 -------------------------------------------------
+
+    def _setup_styles(self):
+        """初始化 ttk 样式"""
+        style = ttk.Style()
+        style.configure("Highlight.TFrame", background="#cce5ff")
+
+    def _build_ui(self):
+        """构建主界面布局"""
+        # 设置样式
+        self._setup_styles()
+
+        # 主 PanedWindow：左右分栏 + 底部
+        main_pw = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
+        main_pw.pack(fill=tk.BOTH, expand=True)
+
+        # 上半部分：左右分栏
+        top_pw = ttk.PanedWindow(main_pw, orient=tk.HORIZONTAL)
+        main_pw.add(top_pw, weight=3)
+
+        # 底部汇总区
+        bottom_frame = ttk.LabelFrame(main_pw, text="装备需求总计（面向所有勾选的小队方案，取各装备需求最大值）", padding=5)
+        main_pw.add(bottom_frame, weight=1)
+
+        # --- 左侧：小队方案选择 ---
+        left_frame = ttk.LabelFrame(top_pw, text="小队方案（可多选）", padding=5)
+        top_pw.add(left_frame, weight=1)
+
+        # 左侧顶部按钮
+        btn_frame = ttk.Frame(left_frame)
+        btn_frame.pack(fill=tk.X, pady=(0, 5))
+        ttk.Button(btn_frame, text="全选", command=self._select_all).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="全不选", command=self._select_none).pack(side=tk.LEFT, padx=2)
+
+        # 可滚动的小队列表
+        list_container = ttk.Frame(left_frame)
+        list_container.pack(fill=tk.BOTH, expand=True)
+
+        self._team_canvas = tk.Canvas(list_container, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(list_container, orient=tk.VERTICAL, command=self._team_canvas.yview)
+        self._team_inner = ttk.Frame(self._team_canvas)
+
+        self._team_inner.bind("<Configure>",
+            lambda e: self._team_canvas.configure(scrollregion=self._team_canvas.bbox("all")))
+        self._team_canvas.create_window((0, 0), window=self._team_inner, anchor="nw")
+        self._team_canvas.configure(yscrollcommand=scrollbar.set)
+
+        self._team_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._team_canvas.bind("<Enter>", lambda e: self._team_canvas.bind_all("<MouseWheel>",
+            lambda ev: self._team_canvas.yview_scroll(int(-1 * (ev.delta / 120)), "units")))
+        self._team_canvas.bind("<Leave>", lambda e: self._team_canvas.unbind_all("<MouseWheel>"))
+
+        # 填充小队复选框
+        for team_name in self.config.teams:
+            self._add_team_checkbox(team_name)
+
+        # --- 右侧：队员装备详情（双行网格） ---
+        right_frame = ttk.LabelFrame(top_pw, text="队员装备详情（点击左侧小队名查看）", padding=5)
+        top_pw.add(right_frame, weight=2)
+
+        # 使用 Canvas + 内部 Frame 实现可滚动的表格
+        self._detail_canvas = tk.Canvas(right_frame, highlightthickness=0)
+        detail_scroll = ttk.Scrollbar(right_frame, orient=tk.VERTICAL, command=self._detail_canvas.yview)
+        self._detail_grid = ttk.Frame(self._detail_canvas)
+
+        self._detail_grid.bind("<Configure>",
+            lambda e: self._detail_canvas.configure(scrollregion=self._detail_canvas.bbox("all")))
+        self._detail_canvas.create_window((0, 0), window=self._detail_grid, anchor="nw")
+        self._detail_canvas.configure(yscrollcommand=detail_scroll.set)
+
+        self._detail_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        detail_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        # 鼠标滚轮
+        self._detail_canvas.bind("<Enter>", lambda e: self._detail_canvas.bind_all("<MouseWheel>",
+            lambda ev: self._detail_canvas.yview_scroll(int(-1 * (ev.delta / 120)), "units")))
+        self._detail_canvas.bind("<Leave>", lambda e: self._detail_canvas.unbind_all("<MouseWheel>"))
+
+        # --- 底部：装备总数 ---
+        bottom_inner = ttk.Frame(bottom_frame)
+        bottom_inner.pack(fill=tk.BOTH, expand=True)
+
+        self._summary_tree = ttk.Treeview(bottom_inner,
+            columns=("装备名称", "需要数量", "已有数量", "状态", "装备类型"),
+            show="headings", height=8)
+        self._summary_tree.heading("装备名称", text="装备名称")
+        self._summary_tree.heading("需要数量", text="需要数量")
+        self._summary_tree.heading("已有数量", text="已有数量")
+        self._summary_tree.heading("状态", text="状态")
+        self._summary_tree.heading("装备类型", text="装备类型")
+        self._summary_tree.column("装备名称", width=180, anchor="center")
+        self._summary_tree.column("需要数量", width=80, anchor="center")
+        self._summary_tree.column("已有数量", width=80, anchor="center")
+        self._summary_tree.column("状态", width=80, anchor="center")
+        self._summary_tree.column("装备类型", width=100, anchor="center")
+
+        summary_scroll = ttk.Scrollbar(bottom_inner, orient=tk.VERTICAL, command=self._summary_tree.yview)
+        self._summary_tree.configure(yscrollcommand=summary_scroll.set)
+        self._summary_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        summary_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 底部标签
+        info_label = ttk.Label(bottom_frame, text="提示：同一小队中重复装备如实计数；不同小队间只取最大值（同时仅一队上场）。",
+                               foreground="gray")
+        info_label.pack(anchor="w", pady=(2, 0))
+
+    def _add_team_checkbox(self, team_name):
+        """在左侧列表中添加一个小队的复选框"""
+        var = tk.BooleanVar(value=False)
+        self.team_vars[team_name] = var
+
+        frame = ttk.Frame(self._team_inner)
+        frame.pack(fill=tk.X, padx=2, pady=1)
+
+        cb = ttk.Checkbutton(frame, text=team_name, variable=var,
+                             command=lambda tn=team_name: self._on_team_toggle(tn))
+        cb.pack(side=tk.LEFT, anchor="w")
+
+        # 点击小队名查看详情
+        cb.bind("<Button-1>", lambda e, tn=team_name: self._on_team_click(tn), add="+")
+
+        # 也绑定到 frame 方便点击
+        frame.bind("<Button-1>", lambda e, tn=team_name: self._on_team_click(tn))
+        for child in frame.winfo_children():
+            child.bind("<Button-1>", lambda e, tn=team_name: self._on_team_click(tn), add="+")
+
+        self.team_widgets[team_name] = (frame, cb)
+
+    # ---- 事件处理 -------------------------------------------------
+
+    def _on_team_toggle(self, team_name):
+        """复选框勾选状态变化 → 更新底部汇总"""
+        self._refresh_summary()
+
+    def _on_team_click(self, team_name):
+        """点击小队名 → 右侧展示该队装备"""
+        self._highlight_team(team_name)
+        self._displayed_team = team_name
+        self._refresh_detail(team_name)
+
+    def _highlight_team(self, team_name):
+        """高亮当前选中的小队"""
+        for tn, (frame, cb) in self.team_widgets.items():
+            if tn == team_name:
+                frame.configure(style="Highlight.TFrame")
+            else:
+                frame.configure(style="TFrame")
+
+    def _select_all(self):
+        for var in self.team_vars.values():
+            var.set(True)
+        self._refresh_summary()
+
+    def _select_none(self):
+        for var in self.team_vars.values():
+            var.set(False)
+        self._refresh_summary()
+
+    # ---- 刷新视图 -------------------------------------------------
+
+    def _refresh_detail(self, team_name):
+        """刷新右侧队员装备详情 —— 双行网格：上行装备名，下行属性值"""
+        # 清除旧组件
+        for w in self._detail_grid.winfo_children():
+            w.destroy()
+
+        gear_list = self.config.get_team_gear_list(team_name)
+        cols = ("序号", "角色", "套装", "护甲", "护手", "配件1", "配件2")
+        col_widths = (50, 80, 90, 130, 130, 140, 140)
+
+        # ---------- 表头 ----------
+        header_font = ("Microsoft YaHei UI", 9, "bold")
+        for ci, (col, cw) in enumerate(zip(cols, col_widths)):
+            lbl = tk.Label(self._detail_grid, text=col, font=header_font,
+                           bg="#e0e0e0", relief="ridge", borderwidth=1, width=cw // 7)
+            lbl.grid(row=0, column=ci, sticky="nsew", padx=0, pady=0)
+
+        # ---------- 数据行（每角色2行） ----------
+        row_offset = 1
+        for g in gear_list:
+            char_row = row_offset      # 装备名行
+            stat_row = row_offset + 1  # 属性值行
+
+            gear_keys = ("护甲", "护手", "配件1", "配件2")
+            name_values = [g["序号"], g["角色"], g["套装"]] + [g[k] for k in gear_keys]
+
+            for ci, val in enumerate(name_values):
+                bg = "#f5f5f5" if ci < 3 else "#ffffff"
+                fg = "black"
+                # 角色基础信息列：合并显示两行
+                if ci < 3:
+                    lbl = tk.Label(self._detail_grid, text=str(val), bg=bg, fg=fg,
+                                   relief="ridge", borderwidth=1, anchor="center")
+                    lbl.grid(row=char_row, column=ci, rowspan=2, sticky="nsew", padx=0, pady=0)
+                else:
+                    # 上行：装备名
+                    lbl_name = tk.Label(self._detail_grid, text=str(val), bg=bg, fg=fg,
+                                        relief="ridge", borderwidth=1, anchor="center")
+                    lbl_name.grid(row=char_row, column=ci, sticky="nsew", padx=0, pady=0)
+                    # 下行：推荐属性
+                    stats = self.config.get_stats_display(str(val))
+                    stat_color = "gray" if stats == "暂缺" else "#0066cc"
+                    stat_font = ("Consolas", 9, "bold") if stats != "暂缺" else ("Microsoft YaHei UI", 8)
+                    lbl_stat = tk.Label(self._detail_grid, text=stats, bg="#fafffe", fg=stat_color,
+                                        font=stat_font, relief="ridge", borderwidth=1, anchor="center")
+                    lbl_stat.grid(row=stat_row, column=ci, sticky="nsew", padx=0, pady=0)
+
+            # 行间分隔线
+            sep = ttk.Separator(self._detail_grid, orient="horizontal")
+            sep.grid(row=stat_row + 1, column=0, columnspan=len(cols), sticky="ew", pady=(2, 2))
+
+            row_offset = stat_row + 2
+
+        # 设置列权重，让内容撑开
+        for ci in range(len(cols)):
+            self._detail_grid.grid_columnconfigure(ci, weight=1)
+
+        # 重置画布滚动位置
+        self._detail_canvas.yview_moveto(0)
+
+    def _refresh_summary(self):
+        """刷新底部装备汇总（含已有对比，绿底满足 / 红底不足）"""
+        for item in self._summary_tree.get_children():
+            self._summary_tree.delete(item)
+
+        selected = [tn for tn, var in self.team_vars.items() if var.get()]
+        totals = self.calculator.calculate(selected)
+        gear_types = self._build_gear_type_map()
+
+        for gear_name in sorted(totals.keys()):
+            need = totals[gear_name]
+            owned = self.config.count_owned(gear_name)
+            status = "✔ 满足" if owned >= need else "✘ 不足"
+            gtype = gear_types.get(gear_name, "—")
+
+            if owned >= need:
+                tag = "satisfied"
+            else:
+                tag = "unsatisfied"
+
+            self._summary_tree.insert("", tk.END, values=(gear_name, need, owned, status, gtype), tags=(tag,))
+
+        self._summary_tree.tag_configure("satisfied", background="#d4edda")    # 绿底
+        self._summary_tree.tag_configure("unsatisfied", background="#f8d7da")  # 红底
+
+    def _build_gear_type_map(self):
+        """构建装备名 → 装备类型的映射"""
+        type_map = {}
+        for gear in self.config.char_gear.values():
+            type_map[gear.armor] = "护甲"
+            type_map[gear.gauntlet] = "护手"
+            for acc in (gear.acc1, gear.acc2):
+                type_map[acc] = "配件"
+        # 已有装备库中未出现在角色装备里的，标记为"已有"
+        for ename in self.config.owned_equipment:
+            if ename not in type_map:
+                type_map[ename] = "已有"
+        return type_map
+
+    def _on_close(self):
+        self.root.destroy()
+
+
+# ============================================================
+#  入口
+# ============================================================
+
+def main():
+    App()
+
+
+if __name__ == "__main__":
+    main()
