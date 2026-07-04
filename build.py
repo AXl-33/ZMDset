@@ -44,6 +44,17 @@ def main():
     subprocess.run(cmd, cwd=PROJECT_DIR, check=True)
 
     # 复制配置文件到输出目录
+    os.makedirs(DIST_DIR, exist_ok=True)
+
+    # 移动 exe 到发布目录
+    src_exe = os.path.join(PROJECT_DIR, "dist", "ZMDset.exe")
+    dst_exe = os.path.join(DIST_DIR, "ZMDset.exe")
+    if os.path.exists(src_exe):
+        if os.path.exists(dst_exe):
+            os.remove(dst_exe)
+        shutil.move(src_exe, dst_exe)
+        print(f"已移动: ZMDset.exe -> {dst_exe}")
+
     src_config = os.path.join(PROJECT_DIR, "setConfig.json")
     dst_config = os.path.join(DIST_DIR, "setConfig.json")
     if os.path.exists(src_config):
