@@ -233,7 +233,7 @@ class ConfigLoader:
                 members_raw.append((idx, char_name, set_name, []))
 
         # Step 2: 每种装备按属性和降序分配
-        allocation = {}  # {(成员索引, 槽位): "653" 或 "暂缺"}
+        allocation = {}  # {(成员索引, 槽位): "333" 或 "暂缺"}
         for gname, demands in gear_demands.items():
             items = sorted(self.owned_equipment.get(gname, []),
                            key=lambda t: t[0] + t[1] + t[2], reverse=True)
