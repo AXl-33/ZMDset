@@ -9,7 +9,7 @@ ZMDset - 小队装备管理工具
   - 同一小队内重复装备会按实际数量统计
   - 不同小队只取各装备需求的最大值（同一时间仅一队上场）
 
-配置文件格式（set.config）—— JSON:
+配置文件格式（setConfig.json）—— JSON:
   {
     "characters": {
       "角色名": [{ "set": "套装名", "armor": "护甲", "gauntlet": "护手",
@@ -88,7 +88,7 @@ class ConfigLoader:
         self.char_gear = {}       # {(char_name, set_name): CharacterGear}
         self.char_sets = defaultdict(list)  # {char_name: [set_name, ...]}
         self.teams = {}           # {team_name: TeamComposition}
-        self.owned_equipment = {} # {装备名: (a, b, c)}
+        self.owned_equipment = {} # {装备名: [(a, b, c), ...]}
         self._parse()
 
     def _parse(self):
@@ -136,19 +136,29 @@ class ConfigLoader:
                 member_list.append((char_name, set_name))
             self.teams[team_name] = TeamComposition(team_name, member_list, comment)
 
-        # 解析已有装备
-        for gear_name, stats in data.get("equipment", {}).items():
-            a = stats.get("a", 0)
-            b = stats.get("b", 0)
-            c = stats.get("c", 0)
-            self.owned_equipment[gear_name] = (a, b, c)
+        # 解析已有装备（兼容单对象和数组两种格式）
+        for gear_name, stats_val in data.get("equipment", {}).items():
+            if isinstance(stats_val, list):
+                # 数组格式: [{"a":6,"b":5,"c":3}, ...]
+                items = []
+                for s in stats_val:
+                    items.append((s.get("a", 0), s.get("b", 0), s.get("c", 0)))
+                self.owned_equipment[gear_name] = items
+            elif isinstance(stats_val, dict):
+                # 单对象格式: {"a":6,"b":5,"c":3}
+                self.owned_equipment[gear_name] = [
+                    (stats_val.get("a", 0), stats_val.get("b", 0), stats_val.get("c", 0))
+                ]
+            else:
+                self.owned_equipment[gear_name] = []
 
     def get_best_stats(self, gear_name):
-        """获取某装备的最佳属性值字符串，如 '653'；没有则返回 None"""
-        stats = self.owned_equipment.get(gear_name)
-        if stats is None:
+        """获取某装备的最佳属性值字符串（取 a+b+c 总和最大的），如 '653'；没有则返回 None"""
+        items = self.owned_equipment.get(gear_name)
+        if not items:
             return None
-        return f"{stats[0]}{stats[1]}{stats[2]}"
+        best = max(items, key=lambda t: t[0] + t[1] + t[2])
+        return f"{best[0]}{best[1]}{best[2]}"
 
     def get_stats_display(self, gear_name):
         """获取推荐属性展示文本：有→'653'，无→'暂缺'"""
@@ -156,8 +166,9 @@ class ConfigLoader:
         return s if s else "暂缺"
 
     def count_owned(self, gear_name):
-        """检查是否拥有某装备（拥有 >= 1 件即可）"""
-        return 1 if gear_name in self.owned_equipment else 0
+        """检查拥有某装备的数量"""
+        items = self.owned_equipment.get(gear_name)
+        return len(items) if items else 0
 
     def get_team_gear_list(self, team_name):
         """获取小队每个成员的装备详情，用于右侧展示"""
@@ -188,6 +199,56 @@ class ConfigLoader:
                     "配件1": "—",
                     "配件2": "—",
                 })
+        return result
+
+    def allocate_gear_for_team(self, team_name):
+        """
+        为小队分配已有装备（考虑同装备多人争用，按属性和从大到小依次分配）。
+        返回每个成员的装备名 + 分配到的属性值。
+        """
+        team = self.teams.get(team_name)
+        if not team:
+            return []
+
+        # Step 1: 收集全队装备需求 {装备名: [(成员索引, 槽位名), ...]}
+        gear_demands = defaultdict(list)
+        members_raw = []
+        for idx, (char_name, set_name) in enumerate(team.members):
+            key = (char_name, set_name)
+            gear = self.char_gear.get(key)
+            if gear:
+                slots = [("护甲", gear.armor), ("护手", gear.gauntlet),
+                         ("配件1", gear.acc1), ("配件2", gear.acc2)]
+                members_raw.append((idx, char_name, set_name, slots))
+                for slot, gname in slots:
+                    gear_demands[gname].append((idx, slot))
+            else:
+                members_raw.append((idx, char_name, set_name, []))
+
+        # Step 2: 每种装备按属性和降序分配
+        allocation = {}  # {(成员索引, 槽位): "653" 或 "暂缺"}
+        for gname, demands in gear_demands.items():
+            items = sorted(self.owned_equipment.get(gname, []),
+                           key=lambda t: t[0] + t[1] + t[2], reverse=True)
+            for di, (char_idx, slot) in enumerate(demands):
+                if di < len(items):
+                    it = items[di]
+                    allocation[(char_idx, slot)] = f"{it[0]}{it[1]}{it[2]}"
+                else:
+                    allocation[(char_idx, slot)] = "暂缺"
+
+        # Step 3: 组装结果
+        result = []
+        for idx, char_name, set_name, slots in members_raw:
+            entry = {"序号": idx + 1, "角色": char_name, "套装": set_name}
+            for slot, gname in slots:
+                entry[slot] = gname
+                entry[f"{slot}_stat"] = allocation.get((idx, slot), "暂缺")
+            # 保证所有槽位都有默认值
+            for slot in ("护甲", "护手", "配件1", "配件2"):
+                entry.setdefault(slot, "—")
+                entry.setdefault(f"{slot}_stat", "暂缺")
+            result.append(entry)
         return result
 
 
@@ -236,7 +297,7 @@ class App:
         self.root.minsize(800, 500)
 
         # ---------- 加载配置 ----------
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "set.config")
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "setConfig.json")
         try:
             self.config = ConfigLoader(config_path)
         except FileNotFoundError as e:
@@ -385,16 +446,24 @@ class App:
         self._summary_tree = ttk.Treeview(bottom_inner,
             columns=("装备名称", "需要数量", "已有数量", "状态", "装备类型"),
             show="headings", height=8)
-        self._summary_tree.heading("装备名称", text="装备名称")
-        self._summary_tree.heading("需要数量", text="需要数量")
-        self._summary_tree.heading("已有数量", text="已有数量")
-        self._summary_tree.heading("状态", text="状态")
-        self._summary_tree.heading("装备类型", text="装备类型")
+
+        # 可点击排序的列标题
+        for col_key in ("装备名称", "需要数量", "已有数量", "状态", "装备类型"):
+            self._summary_tree.heading(col_key, text=col_key,
+                command=lambda c=col_key: self._sort_summary(c))
         self._summary_tree.column("装备名称", width=180, anchor="center")
         self._summary_tree.column("需要数量", width=80, anchor="center")
         self._summary_tree.column("已有数量", width=80, anchor="center")
         self._summary_tree.column("状态", width=80, anchor="center")
         self._summary_tree.column("装备类型", width=100, anchor="center")
+
+        # 排序状态
+        self._summary_sort_col = None
+        self._summary_sort_rev = False
+        self._summary_rows = []  # [{col: val, "tag": ...}, ...]
+
+        self._summary_tree.tag_configure("satisfied", background="#d4edda")
+        self._summary_tree.tag_configure("unsatisfied", background="#f8d7da")
 
         summary_scroll = ttk.Scrollbar(bottom_inner, orient=tk.VERTICAL, command=self._summary_tree.yview)
         self._summary_tree.configure(yscrollcommand=summary_scroll.set)
@@ -461,12 +530,11 @@ class App:
     # ---- 刷新视图 -------------------------------------------------
 
     def _refresh_detail(self, team_name):
-        """刷新右侧队员装备详情 —— 双行网格：上行装备名，下行属性值"""
-        # 清除旧组件
+        """刷新右侧队员装备详情 —— 双行网格：上行装备名，下行按分配推荐属性"""
         for w in self._detail_grid.winfo_children():
             w.destroy()
 
-        gear_list = self.config.get_team_gear_list(team_name)
+        allocated = self.config.allocate_gear_for_team(team_name)
         cols = ("序号", "角色", "套装", "护甲", "护手", "配件1", "配件2")
 
         # ---------- 表头 ----------
@@ -478,36 +546,35 @@ class App:
 
         # ---------- 数据行（每角色2行） ----------
         row_offset = 1
-        for g in gear_list:
-            char_row = row_offset      # 装备名行
-            stat_row = row_offset + 1  # 属性值行
+        gear_keys = ("护甲", "护手", "配件1", "配件2")
+        for g in allocated:
+            char_row = row_offset
+            stat_row = row_offset + 1
 
-            gear_keys = ("护甲", "护手", "配件1", "配件2")
-            name_values = [g["序号"], g["角色"], g["套装"]] + [g[k] for k in gear_keys]
+            name_values = [g["序号"], g["角色"], g["套装"]] + [g.get(k, "—") for k in gear_keys]
+            stat_values = [g.get(f"{k}_stat", "暂缺") for k in gear_keys]
 
             for ci, val in enumerate(name_values):
                 bg = "#f5f5f5" if ci < 3 else "#ffffff"
-                fg = "black"
                 if ci < 3:
-                    lbl = tk.Label(self._detail_grid, text=str(val), bg=bg, fg=fg,
+                    lbl = tk.Label(self._detail_grid, text=str(val), bg=bg, fg="black",
                                    relief="ridge", borderwidth=1, anchor="center")
                     lbl.grid(row=char_row, column=ci, rowspan=2, sticky="nsew", padx=0, pady=0)
                 else:
-                    lbl_name = tk.Label(self._detail_grid, text=str(val), bg=bg, fg=fg,
+                    lbl_name = tk.Label(self._detail_grid, text=str(val), bg=bg, fg="black",
                                         relief="ridge", borderwidth=1, anchor="center",
                                         wraplength=100, justify="center")
                     lbl_name.grid(row=char_row, column=ci, sticky="nsew", padx=0, pady=0)
-                    stats = self.config.get_stats_display(str(val))
-                    stat_color = "gray" if stats == "暂缺" else "#0066cc"
-                    stat_font = ("Consolas", 9, "bold") if stats != "暂缺" else ("Microsoft YaHei UI", 8)
-                    lbl_stat = tk.Label(self._detail_grid, text=stats, bg="#fafffe", fg=stat_color,
+
+                    stat_val = stat_values[ci - 3]
+                    stat_color = "gray" if stat_val == "暂缺" else "#0066cc"
+                    stat_font = ("Consolas", 9, "bold") if stat_val != "暂缺" else ("Microsoft YaHei UI", 8)
+                    lbl_stat = tk.Label(self._detail_grid, text=stat_val, bg="#fafffe", fg=stat_color,
                                         font=stat_font, relief="ridge", borderwidth=1, anchor="center")
                     lbl_stat.grid(row=stat_row, column=ci, sticky="nsew", padx=0, pady=0)
 
-            # 行间分隔线
             sep = ttk.Separator(self._detail_grid, orient="horizontal")
             sep.grid(row=stat_row + 1, column=0, columnspan=len(cols), sticky="ew", pady=(2, 2))
-
             row_offset = stat_row + 2
 
         # 设置列权重，让内容撑开
@@ -533,28 +600,61 @@ class App:
 
     def _refresh_summary(self):
         """刷新底部装备汇总（含已有对比，绿底满足 / 红底不足）"""
-        for item in self._summary_tree.get_children():
-            self._summary_tree.delete(item)
-
         selected = [tn for tn, var in self.team_vars.items() if var.get()]
         totals = self.calculator.calculate(selected)
         gear_types = self._build_gear_type_map()
 
+        rows = []
         for gear_name in sorted(totals.keys()):
             need = totals[gear_name]
             owned = self.config.count_owned(gear_name)
             status = "✔ 满足" if owned >= need else "✘ 不足"
             gtype = gear_types.get(gear_name, "—")
+            tag = "satisfied" if owned >= need else "unsatisfied"
+            rows.append({"装备名称": gear_name, "需要数量": need, "已有数量": owned,
+                         "状态": status, "装备类型": gtype, "tag": tag})
 
-            if owned >= need:
-                tag = "satisfied"
-            else:
-                tag = "unsatisfied"
+        self._summary_rows = rows
+        self._summary_sort_col = None
+        self._summary_sort_rev = False
+        self._repopulate_summary()
 
-            self._summary_tree.insert("", tk.END, values=(gear_name, need, owned, status, gtype), tags=(tag,))
+    def _repopulate_summary(self):
+        """清空并重新填充汇总表格（按当前排序）"""
+        for item in self._summary_tree.get_children():
+            self._summary_tree.delete(item)
+        for row in self._summary_rows:
+            self._summary_tree.insert("", tk.END,
+                values=(row["装备名称"], row["需要数量"], row["已有数量"], row["状态"], row["装备类型"]),
+                tags=(row["tag"],))
+        # 更新列标题箭头
+        cols = ("装备名称", "需要数量", "已有数量", "状态", "装备类型")
+        for c in cols:
+            arrow = ""
+            if c == self._summary_sort_col:
+                arrow = " ▲" if not self._summary_sort_rev else " ▼"
+            self._summary_tree.heading(c, text=c + arrow,
+                command=lambda cc=c: self._sort_summary(cc))
 
-        self._summary_tree.tag_configure("satisfied", background="#d4edda")    # 绿底
-        self._summary_tree.tag_configure("unsatisfied", background="#f8d7da")  # 红底
+    def _sort_summary(self, col):
+        """点击列标题排序"""
+        if self._summary_sort_col == col:
+            self._summary_sort_rev = not self._summary_sort_rev
+        else:
+            self._summary_sort_col = col
+            self._summary_sort_rev = False
+
+        key_map = {"装备名称": "装备名称", "需要数量": "需要数量",
+                   "已有数量": "已有数量", "状态": "状态", "装备类型": "装备类型"}
+        key = key_map.get(col, "装备名称")
+
+        # 数值列按数值排序
+        if key in ("需要数量", "已有数量"):
+            self._summary_rows.sort(key=lambda r: r[key], reverse=self._summary_sort_rev)
+        else:
+            self._summary_rows.sort(key=lambda r: r[key], reverse=self._summary_sort_rev)
+
+        self._repopulate_summary()
 
     def _build_gear_type_map(self):
         """构建装备名 → 装备类型的映射"""
