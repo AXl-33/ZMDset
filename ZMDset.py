@@ -31,6 +31,13 @@ from tkinter import ttk
 from collections import Counter, defaultdict
 
 
+def _app_dir():
+    """返回应用程序所在目录（兼容 PyInstaller 打包）"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 # ============================================================
 #  配置解析模块
 # ============================================================
@@ -297,7 +304,7 @@ class App:
         self.root.minsize(800, 500)
 
         # ---------- 加载配置 ----------
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "setConfig.json")
+        config_path = os.path.join(_app_dir(), "setConfig.json")
         try:
             self.config = ConfigLoader(config_path)
         except FileNotFoundError as e:
@@ -530,7 +537,7 @@ class App:
 
     def _reload_config(self):
         """重新加载 setConfig.json 并刷新全部界面"""
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "setConfig.json")
+        config_path = os.path.join(_app_dir(), "setConfig.json")
         try:
             self.config = ConfigLoader(config_path)
             self.calculator = GearCalculator(self.config)

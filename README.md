@@ -20,6 +20,7 @@ ZMDset/
 ├── ZMDset.py          # 主程序（GUI）
 ├── setConfig.json      # 配置文件
 ├── format_config.py    # 格式化 & 排序脚本
+├── build.py            # PyInstaller 打包脚本
 ├── .gitignore
 └── README.md
 ```
@@ -78,3 +79,21 @@ python format_config.py
 ```
 
 自动对 `setConfig.json` 进行 4 空格缩进，并按 `characters`、`equipment`、`teams` 条目名排序。
+
+## 构建发布版本
+
+生成独立 `.exe` 文件，分发给未安装 Python 的用户：
+
+```powershell
+pip install pyinstaller
+python build.py
+```
+
+输出目录 `dist/ZMDset/` 包含：
+
+| 文件 | 说明 |
+|------|------|
+| `ZMDset.exe` | 主程序（双击运行） |
+| `setConfig.json` | 配置文件（用户可编辑，点击 🔄 刷新同步） |
+
+将整个 `dist/ZMDset/` 文件夹打包为 zip 即可分发。
