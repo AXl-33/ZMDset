@@ -347,7 +347,7 @@ class App:
     def _setup_styles(self):
         """初始化 ttk 样式"""
         style = ttk.Style()
-        style.configure("Highlight.TFrame", background="#cce5ff")
+        style.configure("Highlight.TFrame", background="#99c8f0")
 
     def _build_ui(self):
         """构建主界面布局"""
@@ -462,8 +462,8 @@ class App:
         self._summary_sort_rev = False
         self._summary_rows = []  # [{col: val, "tag": ...}, ...]
 
-        self._summary_tree.tag_configure("satisfied", background="#d4edda")
-        self._summary_tree.tag_configure("unsatisfied", background="#f8d7da")
+        self._summary_tree.tag_configure("satisfied", background="#a3d9b1")
+        self._summary_tree.tag_configure("unsatisfied", background="#f2a3a6")
 
         summary_scroll = ttk.Scrollbar(bottom_inner, orient=tk.VERTICAL, command=self._summary_tree.yview)
         self._summary_tree.configure(yscrollcommand=summary_scroll.set)
@@ -541,7 +541,7 @@ class App:
         header_font = ("Microsoft YaHei UI", 9, "bold")
         for ci, col in enumerate(cols):
             lbl = tk.Label(self._detail_grid, text=col, font=header_font,
-                           bg="#e0e0e0", relief="ridge", borderwidth=1)
+                           bg="#cccccc", relief="ridge", borderwidth=1)
             lbl.grid(row=0, column=ci, sticky="nsew", padx=0, pady=0)
 
         # ---------- 数据行（每角色2行） ----------
@@ -555,7 +555,7 @@ class App:
             stat_values = [g.get(f"{k}_stat", "暂缺") for k in gear_keys]
 
             for ci, val in enumerate(name_values):
-                bg = "#f5f5f5" if ci < 3 else "#ffffff"
+                bg = "#e0e0e0" if ci < 3 else "#ffffff"
                 if ci < 3:
                     lbl = tk.Label(self._detail_grid, text=str(val), bg=bg, fg="black",
                                    relief="ridge", borderwidth=1, anchor="center")
@@ -569,7 +569,7 @@ class App:
                     stat_val = stat_values[ci - 3]
                     stat_color = "gray" if stat_val == "暂缺" else "#0066cc"
                     stat_font = ("Consolas", 9, "bold") if stat_val != "暂缺" else ("Microsoft YaHei UI", 8)
-                    lbl_stat = tk.Label(self._detail_grid, text=stat_val, bg="#fafffe", fg=stat_color,
+                    lbl_stat = tk.Label(self._detail_grid, text=stat_val, bg="#e5f2e9", fg=stat_color,
                                         font=stat_font, relief="ridge", borderwidth=1, anchor="center")
                     lbl_stat.grid(row=stat_row, column=ci, sticky="nsew", padx=0, pady=0)
 
