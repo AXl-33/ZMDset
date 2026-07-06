@@ -186,7 +186,7 @@ class GridDetector:
         self.grid_y = grid_cfg["y"]
         self.grid_br_x = grid_cfg.get("br_x", 9999)
         self.grid_br_y = grid_cfg.get("br_y", 9999)
-        self.cell_size = grid_cfg.get("cell_size", 70)
+        self.cell_size = grid_cfg.get("cell_size", 120)
 
     def detect(self, frame_bgr):
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
@@ -224,7 +224,7 @@ class GridDetector:
         """从二值图中提取方形格子"""
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        tolerance = 0.35
+        tolerance = 0.3
         min_s = int(self.cell_size * (1 - tolerance))
         max_s = int(self.cell_size * (1 + tolerance))
 
@@ -253,12 +253,13 @@ class GridDetector:
         if not cells:
             return []
 
-        # 按行分组
+        # 按行分组 —— 用较大的阈值避免同行被错误拆分
         sorted_by_y = sorted(cells, key=lambda c: c[5])
+        row_threshold = self.cell_size * 0.5
         rows = []
         current = [sorted_by_y[0]]
         for cell in sorted_by_y[1:]:
-            if abs(cell[5] - current[-1][5]) < self.cell_size * 0.5:
+            if abs(cell[5] - current[-1][5]) < row_threshold:
                 current.append(cell)
             else:
                 rows.append(sorted(current, key=lambda c: c[4]))
@@ -585,7 +586,7 @@ class EquipmentScanner:
     5. 收集结果
     """
 
-    def __init__(self, resolution, res_cfg: ResolutionConfig, on_log=None, on_progress=None, on_cell_done=None):
+    def __init__(self, resolution, res_cfg: ResolutionConfig, on_log=None, on_progress=None, on_cell_done=None, on_page_complete=None):
         self.resolution = resolution
         self.cfg = res_cfg.get(resolution)
         if self.cfg is None:
@@ -601,6 +602,7 @@ class EquipmentScanner:
         self.on_log = on_log or (lambda msg: None)
         self.on_progress = on_progress or (lambda cur, total: None)
         self.on_cell_done = on_cell_done or (lambda idx, name, stats: None)
+        self.on_page_complete = on_page_complete or (lambda: None)
 
         # 扫描状态
         self.scanning = False
@@ -745,6 +747,7 @@ class EquipmentScanner:
 
             # 自动暂停，等待用户操作
             self.paused = True
+            self.on_page_complete()
             page_num += 1
 
     def stop(self):
@@ -1140,6 +1143,7 @@ class ScannerApp:
                 on_log=self._log,
                 on_progress=self._on_progress,
                 on_cell_done=self._on_cell_done,
+                on_page_complete=self._on_page_complete,
             )
         except Exception as e:
             messagebox.showerror("初始化失败", str(e))
@@ -1186,10 +1190,6 @@ class ScannerApp:
         """单格扫描完成回调（在子线程中调用）"""
         self.scan_results.append({"name": name, "a": stats[0], "b": stats[1], "c": stats[2]})
         self.root.after(0, lambda: self._add_result_row(name, stats[0], stats[1], stats[2]))
-
-        # 检测到页面扫描完成 → 更新按钮状态
-        if self.scanner and self.scanner.paused:
-            self.root.after(0, self._on_page_complete)
 
     def _on_page_complete(self):
         """页面扫描完成后更新 UI"""

@@ -299,7 +299,7 @@
             "y": 120,
             "cols": 9,
             "cell_size": 120,
-            "gap": 12,
+            "gap": 10,
             "rows_visible": 5,
             "cells": [
                 [

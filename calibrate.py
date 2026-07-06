@@ -512,7 +512,7 @@ class CalibratorApp:
             if score > best_score:
                 best_score = score
                 best = c
-        return best if best_score >= 0.6 else None
+        return best if best_score >= 0.7 else None
 
     def _ocr_roi(self):
         """对选定区域执行 OCR 识别（与 getconfig.py 完全一致）"""
