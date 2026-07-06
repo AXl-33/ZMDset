@@ -53,12 +53,6 @@ except ImportError:
     HAS_PYGETWINDOW = False
 
 try:
-    import keyboard
-    HAS_KEYBOARD = True
-except ImportError:
-    HAS_KEYBOARD = False
-
-try:
     import pytesseract
     HAS_TESSERACT = True
 except ImportError:
@@ -103,17 +97,13 @@ class ResolutionConfig:
 
     @property
     def resolutions(self):
-        """返回所有预设分辨率列表"""
-        return [k for k in self.data.keys() if not k.startswith("_")]
+        """返回所有预设分辨率列表（格式如 1920x1080）"""
+        return [k for k in self.data.keys() if "x" in k and not k.startswith("_")]
 
     def get(self, resolution):
         """获取指定分辨率的配置，不存在返回 None"""
         return self.data.get(resolution)
 
-    def save(self):
-        """保存配置到文件"""
-        with open(self.filepath, "w", encoding="utf-8") as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=4)
 
 
 # ============================================================
@@ -138,23 +128,11 @@ class WindowCapture:
             "height": height,
         }
 
-    def set_fullscreen(self, monitor_index=1):
-        """捕获整个屏幕"""
-        self.monitor = self.sct.monitors[monitor_index]
-
     def capture(self):
         """捕获一帧，返回 BGR numpy 数组 (OpenCV 格式)"""
         if self.monitor is None:
-            raise RuntimeError("请先调用 set_region 或 set_fullscreen")
+            raise RuntimeError("请先调用 set_region")
         img = self.sct.grab(self.monitor)
-        # mss 返回 BGRA，转为 BGR
-        arr = np.array(img)
-        return cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
-
-    def capture_region(self, left, top, width, height):
-        """捕获指定区域（屏幕绝对坐标），返回 BGR"""
-        monitor = {"left": left, "top": top, "width": width, "height": height}
-        img = self.sct.grab(monitor)
         arr = np.array(img)
         return cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
 
@@ -401,24 +379,6 @@ class AttributeRecognizer:
         ratio = np.sum(white) / 255 / (strip_h * bottom.shape[1])
         return 2 if ratio > 0.10 else 3
 
-    def debug_visualize(self, frame_bgr, num_attrs=3):
-        """返回用于调试的可视化图像（标注属性区域和识别结果）"""
-        viz = frame_bgr.copy()
-        h, w = viz.shape[:2]
-        x1, y1 = self.attr_x, self.attr_y
-        x2, y2 = min(w, x1 + self.attr_w), min(h, y1 + self.attr_h)
-
-        # 画属性区域框
-        cv2.rectangle(viz, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-        # 画行分割线
-        roi_h = y2 - y1
-        row_h = max(1, roi_h // num_attrs)
-        for i in range(1, num_attrs):
-            ly = y1 + i * row_h
-            cv2.line(viz, (x1, ly), (x2, ly), (0, 255, 255), 1)
-
-        return viz
 
 
 # ============================================================
@@ -547,14 +507,11 @@ except Exception as e:
 class MouseController:
     """通过 Interception 驱动在硬件层模拟鼠标输入"""
 
-    def click(self, screen_x, screen_y, button="left"):
+    def click(self, screen_x, screen_y):
         if not _INTERCEPTION_OK:
             return
         _interception.move_to(int(screen_x), int(screen_y))
         _interception.click()
-
-    def activate_window(self):
-        pass
 
 
 # ============================================================
@@ -660,7 +617,8 @@ class EquipmentScanner:
         cells = self.grid_detector.detect(frame)
         if not cells:
             self._log("⚠️ 未检测到装备格，使用预设坐标推算")
-            cells = self.grid_detector._fallback_grid()
+            hc = self.grid_detector._hardcoded_cells()
+            cells = hc if hc else []
 
         total = len(cells)
         self._log(f"   检测到 {total} 个装备格 ({self.cfg['grid']['cols']}列 × {total // max(1, self.cfg['grid']['cols'])}行)")
@@ -752,9 +710,6 @@ class EquipmentScanner:
         """继续扫描（翻页后）"""
         self.paused = False
 
-    def get_summary(self):
-        """获取扫描结果摘要"""
-        return self.results[:]
 
 
 # ============================================================
@@ -839,7 +794,7 @@ class ScannerApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("ZMDset — 装备自动识别工具")
-        self.root.minsize(700, 550)
+        self.root.minsize(750, 580)
 
         # ── 加载分辨率配置 ──
         try:
@@ -856,13 +811,11 @@ class ScannerApp:
         self.scan_results = []  # 本轮累计结果
         self.window_region = None  # (left, top, width, height)
         self._window_title = None  # 窗口标题（用于动态追踪位置）
-        self._preview_img = None  # 预览截图
 
         # ── 构建界面 ──
         self._build_ui()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._register_app_hotkeys()
         self.root.mainloop()
 
     # ── UI 构建 ──────────────────────────────────────────
@@ -883,22 +836,35 @@ class ScannerApp:
         # 窗口定位按钮
         ttk.Button(ctrl_frame, text="📍 定位游戏窗口", command=self._locate_window).pack(side=tk.LEFT, padx=5)
 
+        # 分隔
+        ttk.Separator(ctrl_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+
         # 扫描控制按钮
         self.btn_scan = ttk.Button(ctrl_frame, text="▶ 开始扫描", command=self._start_scan, state=tk.DISABLED)
-        self.btn_scan.pack(side=tk.LEFT, padx=5)
+        self.btn_scan.pack(side=tk.LEFT, padx=3)
 
         self.btn_resume = ttk.Button(ctrl_frame, text="▶ 继续下一页", command=self._resume_scan, state=tk.DISABLED)
-        self.btn_resume.pack(side=tk.LEFT, padx=5)
+        self.btn_resume.pack(side=tk.LEFT, padx=3)
 
         self.btn_stop = ttk.Button(ctrl_frame, text="⏹ 停止", command=self._stop_scan, state=tk.DISABLED)
-        self.btn_stop.pack(side=tk.LEFT, padx=5)
+        self.btn_stop.pack(side=tk.LEFT, padx=3)
 
-        # 右侧按钮
-        ttk.Button(ctrl_frame, text="👁 预览属性区域", command=self._preview_attr).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(ctrl_frame, text="💾 导出临时配置", command=self._export_temp).pack(side=tk.RIGHT, padx=5)
-        self.btn_merge = ttk.Button(ctrl_frame, text="✅ 确认合并到 setConfig.json",
-                                    command=self._confirm_merge, state=tk.DISABLED)
-        self.btn_merge.pack(side=tk.RIGHT, padx=5)
+        # ── 第二行：识别 & 操作按钮 ──
+        btn_frame2 = ttk.Frame(self.root, padding=(10, 0, 10, 5))
+        btn_frame2.pack(fill=tk.X)
+
+        ttk.Button(btn_frame2, text="👁 预览窗口全貌", command=self._preview_full_window).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_frame2, text="🎯 识别单个装备", command=self._scan_single).pack(side=tk.LEFT, padx=3)
+
+        # 右侧：导出 & 合并
+        ttk.Separator(btn_frame2, orient=tk.VERTICAL).pack(side=tk.RIGHT, fill=tk.Y, padx=5)
+        ttk.Button(btn_frame2, text="💾 导出临时配置", command=self._export_temp).pack(side=tk.RIGHT, padx=3)
+        self.btn_merge = ttk.Button(btn_frame2, text="✅ 合并精锻装备到 setConfig",
+                                    command=self._merge_refined, state=tk.DISABLED)
+        self.btn_merge.pack(side=tk.RIGHT, padx=3)
+        self.btn_merge_all = ttk.Button(btn_frame2, text="✅ 合并全部到 setConfig",
+                                        command=self._confirm_merge, state=tk.DISABLED)
+        self.btn_merge_all.pack(side=tk.RIGHT, padx=3)
 
         # 中间区域：左右分栏
         main_pw = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
@@ -1117,6 +1083,37 @@ class ScannerApp:
         self.btn_scan.configure(state=tk.NORMAL)
         dialog.destroy()
 
+    # ── 窗口位置追踪 ──────────────────────────────────
+
+    def _refresh_window_position(self):
+        """通过窗口标题重新查询位置 + 激活窗口到前台"""
+        if not self._window_title or not HAS_PYGETWINDOW:
+            return False
+        try:
+            windows = gw.getWindowsWithTitle(self._window_title)
+            if not windows:
+                return False
+            w = windows[0]
+            if w.isMinimized:
+                try:
+                    w.restore()
+                    time.sleep(0.2)
+                except Exception:
+                    pass
+            new_left, new_top = w.left, w.top
+            new_w, new_h = w.width, w.height
+            old_left, old_top = self.window_region[:2] if self.window_region else (0, 0)
+            if (new_left, new_top) != (old_left, old_top):
+                self._log(f"🪟 窗口位置已变化: ({old_left},{old_top}) → ({new_left},{new_top})")
+            self.window_region = (new_left, new_top, new_w, new_h)
+            try:
+                w.activate()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
     # ── 扫描控制 ────────────────────────────────────────
 
     def _start_scan(self):
@@ -1150,6 +1147,7 @@ class ScannerApp:
         self.btn_resume.configure(state=tk.NORMAL)
         self.btn_stop.configure(state=tk.NORMAL)
         self.btn_merge.configure(state=tk.DISABLED)
+        self.btn_merge_all.configure(state=tk.DISABLED)
         self.status_var.set("扫描中...")
 
     def _resume_scan(self):
@@ -1171,6 +1169,7 @@ class ScannerApp:
 
         if self.scan_results:
             self.btn_merge.configure(state=tk.NORMAL)
+            self.btn_merge_all.configure(state=tk.NORMAL)
 
         self.status_var.set("扫描已停止")
         self._log("⏹ 扫描已停止")
@@ -1196,6 +1195,7 @@ class ScannerApp:
         self.lbl_total.configure(text=f"共 {len(self.result_tree.get_children())} 件装备")
         if self.result_tree.get_children():
             self.btn_merge.configure(state=tk.NORMAL)
+            self.btn_merge_all.configure(state=tk.NORMAL)
 
     def _clear_results(self):
         """清空结果"""
@@ -1204,6 +1204,7 @@ class ScannerApp:
         self.scan_results.clear()
         self.lbl_total.configure(text="共 0 件装备")
         self.btn_merge.configure(state=tk.DISABLED)
+        self.btn_merge_all.configure(state=tk.DISABLED)
         self._log("🗑 结果已清空")
 
     def _delete_selected(self):
@@ -1265,8 +1266,8 @@ class ScannerApp:
 
     # ── 预览 & 导出 ──────────────────────────────────────
 
-    def _preview_attr(self):
-        """预览属性识别区域（调试用）"""
+    def _preview_full_window(self):
+        """预览整个游戏窗口：网格检测 + 名称区域 + 属性区域划分"""
         if self.window_region is None:
             messagebox.showerror("错误", "请先定位游戏窗口")
             return
@@ -1277,28 +1278,142 @@ class ScannerApp:
             messagebox.showerror("错误", f"未找到分辨率配置: {resolution}")
             return
 
-        cap = WindowCapture()
+        # 激活游戏窗口 + 追踪位置（与扫描前一致）
+        self._refresh_window_position()
+        time.sleep(0.1)
         left, top, w, h = self.window_region
+
+        cap = WindowCapture()
+        cap.set_region(left, top, w, h)
+        frame = cap.capture()
+        viz = frame.copy()
+        h_f, w_f = viz.shape[:2]
+
+        detail = cfg["detail"]
+        grid_cfg = cfg["grid"]
+
+        # ── 1. 网格区域 ──
+        gx, gy = grid_cfg["x"], grid_cfg["y"]
+        gbr_x = min(w_f, grid_cfg.get("br_x", 9999))
+        gbr_y = min(h_f, grid_cfg.get("br_y", 9999))
+        cv2.rectangle(viz, (gx, gy), (gbr_x, gbr_y), (0, 255, 0), 2)
+        cv2.putText(viz, "Grid", (gx + 5, gy + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        # ── 2. 名称识别区域 ──
+        nx = detail.get("name_x", 0)
+        ny = detail.get("name_y", 0)
+        nw = detail.get("name_w", 100)
+        nh = detail.get("name_h", 30)
+        cv2.rectangle(viz, (nx, ny), (nx + nw, ny + nh), (255, 255, 0), 2)
+        cv2.putText(viz, "Name OCR", (nx + 5, ny + nh - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
+        # ── 3. 属性区域 + 属性数量检测 + 分划 ──
+        ax = detail.get("attr_x", 0)
+        ay = detail.get("attr_y", 0)
+        aw = detail.get("attr_w", 100)
+        ah = detail.get("attr_h", 80)
+        cv2.rectangle(viz, (ax, ay), (ax + aw, ay + ah), (255, 0, 255), 2)
+
+        # 复用 AttributeRecognizer 检测属性数量
+        recognizer = AttributeRecognizer(detail, cfg["color"])
+        stats = recognizer.recognize(frame)
+        num_attrs = 3 if stats[2] > 0 else (2 if stats[1] > 0 else 1)
+
+        # 画属性行分割线（用 attr_layout）
+        layout = detail.get("attr_layout", {"2": [[0, 38], [38, 72]], "3": [[0, 28], [28, 56], [56, 85]]})
+        scheme = layout.get(str(num_attrs), layout["3"])
+        for i in range(num_attrs):
+            ry1, ry2 = scheme[i]
+            ly1 = ay + max(0, min(ry1, ah))
+            ly2 = ay + max(ry1 + 1, min(ry2, ah))
+            cv2.line(viz, (ax, ly1), (ax + aw, ly1), (0, 255, 255), 1)
+            cv2.putText(viz, f"attr{i+1}={stats[i]}", (ax + aw + 5, (ly1 + ly2) // 2 + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+
+        # 标注结果
+        cv2.putText(viz, f"{num_attrs}attrs  a={stats[0]} b={stats[1]} c={stats[2]}",
+                    (ax + 5, ay + ah + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+
+        self._log(f"🔍 窗口预览: {num_attrs}属性 a={stats[0]} b={stats[1]} c={stats[2]}")
+        title = f"Full Window Preview - {resolution}  [press any key to close]"
+        self._show_scaled(title, viz)
+
+    def _show_scaled(self, title, img, min_size=400):
+        """自动缩放过小的图像后显示"""
+        h, w = img.shape[:2]
+        if w < min_size or h < min_size:
+            scale = max(min_size / w, min_size / h)
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+        cv2.imshow(title, img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    def _scan_single(self):
+        """识别当前选中的单个装备（用户需提前在游戏中选中）"""
+        if self.window_region is None:
+            messagebox.showerror("错误", "请先定位游戏窗口")
+            return
+
+        resolution = self.res_var.get()
+        cfg = self.res_cfg.get(resolution)
+        if cfg is None:
+            messagebox.showerror("错误", f"未找到分辨率配置: {resolution}")
+            return
+
+        # 激活游戏窗口 + 追踪位置
+        self._refresh_window_position()
+        time.sleep(0.1)
+        left, top, w, h = self.window_region
+
+        cap = WindowCapture()
         cap.set_region(left, top, w, h)
         frame = cap.capture()
 
+        # 识别属性
         recognizer = AttributeRecognizer(cfg["detail"], cfg["color"])
-        viz = recognizer.debug_visualize(frame, num_attrs=3)
         stats = recognizer.recognize(frame)
 
-        self._log(f"🔍 属性预览: a={stats[0]} b={stats[1]} c={stats[2]}")
+        # OCR 装备名称
+        name_rec = NameRecognizer(cfg["detail"], self.res_cfg.data.get("equipment_names"))
+        name = name_rec.recognize(frame)
+        if not name:
+            name = f"装备_{len(self.scan_results)+1:02d}"
 
-        # 用 OpenCV 显示：左侧属性裁剪区 + 右侧带标注的完整画面
-        attr_x, attr_y = cfg["detail"]["attr_x"], cfg["detail"]["attr_y"]
-        attr_w, attr_h = cfg["detail"]["attr_w"], cfg["detail"]["attr_h"]
-        attr_roi = frame[attr_y:attr_y+attr_h, attr_x:attr_x+attr_w]
+        self._log(f"🎯 单个识别: {name} a={stats[0]} b={stats[1]} c={stats[2]}")
+        self._add_result_row(name, stats[0], stats[1], stats[2])
+        self.scan_results.append({"name": name, "a": stats[0], "b": stats[1], "c": stats[2]})
 
-        # 拼接：左边属性ROI，右边标注图
-        viz_resized = cv2.resize(viz, (attr_roi.shape[1], attr_roi.shape[0]))
-        combined = np.hstack([attr_roi, viz_resized])
-        cv2.imshow("Attr Preview - Left:ROI  Right:Full (press any key)", combined)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+    def _merge_refined(self):
+        """仅合并已精锻的装备（属性不全为 0）到 setConfig.json"""
+        refined = [r for r in self.scan_results if r["a"] > 0 or r["b"] > 0 or r["c"] > 0]
+        skipped = len(self.scan_results) - len(refined)
+        if not refined:
+            messagebox.showinfo("提示", "没有已精锻的装备（全部属性为 0）")
+            return
+
+        temp = self.merger.generate_temp_config(refined)
+        eq_count = len(temp.get("equipment", {}))
+
+        msg = f"即将合并 {eq_count} 种精锻装备（共 {len(refined)} 条记录）到 setConfig.json。"
+        if skipped > 0:
+            msg += f"\n\n已跳过 {skipped} 条未精锻（属性全 0）的记录。"
+        msg += "\n\n确认继续？"
+
+        if not messagebox.askyesno("确认合并精锻装备", msg):
+            return
+
+        try:
+            self.merger.merge(refined, dry_run=False)
+            self._log(f"✅ 合并 {eq_count} 种精锻装备（跳过 {skipped} 条未精锻）")
+            messagebox.showinfo("合并成功",
+                                f"已更新 setConfig.json！\n"
+                                f"新增/更新 {eq_count} 种精锻装备。"
+                                + (f"\n跳过 {skipped} 条未精锻记录。" if skipped else ""))
+        except Exception as e:
+            messagebox.showerror("合并失败", str(e))
 
     def _export_temp(self):
         """导出临时配置文件"""
@@ -1351,46 +1466,9 @@ class ScannerApp:
         """窗口关闭"""
         if self.scanner:
             self.scanner.stop()
-        self._unregister_app_hotkeys()
         cv2.destroyAllWindows()
         self.root.destroy()
 
-    # ── 应用程序全局快捷键 ───────────────────────────
-
-    def _register_app_hotkeys(self):
-        """注册 F5=开始扫描, F6=继续, F7=停止"""
-        if not HAS_KEYBOARD:
-            return
-        try:
-            keyboard.add_hotkey("f5", self._hotkey_start_scan, suppress=False)
-            keyboard.add_hotkey("f6", self._hotkey_resume, suppress=False)
-            keyboard.add_hotkey("f7", self._hotkey_stop, suppress=False)
-            self._log("⌨️  快捷键已注册: F5=开始扫描  F6=继续下一页  F7=停止")
-        except Exception:
-            pass
-
-    def _unregister_app_hotkeys(self):
-        """清理全局快捷键"""
-        if not HAS_KEYBOARD:
-            return
-        for key in ["f5", "f6", "f7"]:
-            try:
-                keyboard.remove_hotkey(key)
-            except Exception:
-                pass
-
-    def _hotkey_start_scan(self):
-        """F5: 开始扫描"""
-        self.root.after(0, self._start_scan)
-
-    def _hotkey_resume(self):
-        """F6: 继续下一页"""
-        if self.scanner and self.scanner.paused:
-            self.root.after(0, self._resume_scan)
-
-    def _hotkey_stop(self):
-        """F7: 停止扫描"""
-        self.root.after(0, self._stop_scan)
 
 
 # ============================================================

@@ -93,7 +93,6 @@ class ConfigLoader:
     def __init__(self, filepath="set.config"):
         self.filepath = filepath
         self.char_gear = {}       # {(char_name, set_name): CharacterGear}
-        self.char_sets = defaultdict(list)  # {char_name: [set_name, ...]}
         self.teams = {}           # {team_name: TeamComposition}
         self.owned_equipment = {} # {装备名: [(a, b, c), ...]}
         self._parse()
@@ -118,7 +117,6 @@ class ConfigLoader:
                     gear_data.get("accessory2", ""),
                 )
                 self.char_gear[gear.key] = gear
-                self.char_sets[char_name].append(set_name)
 
         # 解析小队（支持新旧两种格式）
         for team_name, team_data in data.get("teams", {}).items():
@@ -159,54 +157,10 @@ class ConfigLoader:
             else:
                 self.owned_equipment[gear_name] = []
 
-    def get_best_stats(self, gear_name):
-        """获取某装备的最佳属性值字符串（取 a+b+c 总和最大的），如 '653'；没有则返回 None"""
-        items = self.owned_equipment.get(gear_name)
-        if not items:
-            return None
-        best = max(items, key=lambda t: t[0] + t[1] + t[2])
-        return f"{best[0]}{best[1]}{best[2]}"
-
-    def get_stats_display(self, gear_name):
-        """获取推荐属性展示文本：有→'653'，无→'暂缺'"""
-        s = self.get_best_stats(gear_name)
-        return s if s else "暂缺"
-
     def count_owned(self, gear_name):
         """检查拥有某装备的数量"""
         items = self.owned_equipment.get(gear_name)
         return len(items) if items else 0
-
-    def get_team_gear_list(self, team_name):
-        """获取小队每个成员的装备详情，用于右侧展示"""
-        team = self.teams.get(team_name)
-        if not team:
-            return []
-        result = []
-        for idx, (char_name, set_name) in enumerate(team.members, 1):
-            key = (char_name, set_name)
-            gear = self.char_gear.get(key)
-            if gear:
-                result.append({
-                    "序号": idx,
-                    "角色": char_name,
-                    "套装": set_name,
-                    "护甲": gear.armor,
-                    "护手": gear.gauntlet,
-                    "配件1": gear.acc1,
-                    "配件2": gear.acc2,
-                })
-            else:
-                result.append({
-                    "序号": idx,
-                    "角色": char_name,
-                    "套装": f"{set_name}(未定义)",
-                    "护甲": "—",
-                    "护手": "—",
-                    "配件1": "—",
-                    "配件2": "—",
-                })
-        return result
 
     def allocate_gear_for_team(self, team_name):
         """
@@ -503,7 +457,7 @@ class App:
         for child in frame.winfo_children():
             child.bind("<Button-1>", lambda e, tn=team_name: self._on_team_click(tn), add="+")
 
-        self.team_widgets[team_name] = (frame, cb)
+        self.team_widgets[team_name] = frame
 
     # ---- 事件处理 -------------------------------------------------
 
@@ -519,7 +473,7 @@ class App:
 
     def _highlight_team(self, team_name):
         """高亮当前选中的小队"""
-        for tn, (frame, cb) in self.team_widgets.items():
+        for tn, frame in self.team_widgets.items():
             if tn == team_name:
                 frame.configure(style="Highlight.TFrame")
             else:

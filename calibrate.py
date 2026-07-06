@@ -45,12 +45,6 @@ except ImportError:
     HAS_PYGETWINDOW = False
 
 try:
-    import keyboard
-    HAS_KEYBOARD = True
-except ImportError:
-    HAS_KEYBOARD = False
-
-try:
     import pytesseract
     HAS_TESSERACT = True
 except ImportError:
@@ -82,13 +76,6 @@ OCR_AVAILABLE = HAS_TESSERACT and TESSERACT_PATH is not None
 if OCR_AVAILABLE:
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
 
-
-def _app_dir():
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
-
-
 class CalibratorApp:
     """区域标定工具"""
 
@@ -101,7 +88,6 @@ class CalibratorApp:
         self.window_region = None  # (left, top, width, height)
         self._tracking = False  # 鼠标追踪开关
         self._sct = mss.MSS() if HAS_MSS else None
-        self._hotkeys = []  # 全局快捷键 ID 列表
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -210,9 +196,6 @@ class CalibratorApp:
         ttk.Label(fill_row, text="快捷填入当前鼠标位置:", foreground="#666").pack(side=tk.LEFT)
         ttk.Button(fill_row, text="设为左上", command=self._set_left_top).pack(side=tk.LEFT, padx=3)
         ttk.Button(fill_row, text="设为右下", command=self._set_right_bottom).pack(side=tk.LEFT, padx=3)
-        if HAS_KEYBOARD:
-            ttk.Label(fill_row, text="  快捷键: F1=左上  F2=右下",
-                      foreground="#888888", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, padx=5)
 
     # ── 窗口定位 ──────────────────────────────────────
 
@@ -304,8 +287,6 @@ class CalibratorApp:
         # 自动开始追踪
         if not self._tracking:
             self._toggle_tracking()
-        # 注册全局快捷键 F1/F2
-        self._register_hotkeys()
 
     # ── 鼠标追踪 ──────────────────────────────────────
 
@@ -699,35 +680,8 @@ class CalibratorApp:
 
     def _on_close(self):
         self._tracking = False
-        self._unregister_hotkeys()
         cv2.destroyAllWindows()
         self.root.destroy()
-
-    # ── 全局快捷键 ───────────────────────────────────
-
-    def _register_hotkeys(self):
-        """注册 F1=设为左上, F2=设为右下"""
-        if not HAS_KEYBOARD:
-            return
-        self._unregister_hotkeys()
-        try:
-            self._hotkeys.append(
-                keyboard.add_hotkey("f1", self._set_left_top, suppress=False))
-            self._hotkeys.append(
-                keyboard.add_hotkey("f2", self._set_right_bottom, suppress=False))
-        except Exception:
-            pass
-
-    def _unregister_hotkeys(self):
-        """清理所有全局快捷键"""
-        if not HAS_KEYBOARD:
-            return
-        for hk in self._hotkeys:
-            try:
-                keyboard.remove_hotkey(hk)
-            except Exception:
-                pass
-        self._hotkeys.clear()
 
 
 def main():
