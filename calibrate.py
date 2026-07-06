@@ -95,7 +95,7 @@ class CalibratorApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("ZMDset — 区域标定工具")
-        self.root.minsize(620, 520)
+        self.root.minsize(620, 600)
 
         self.window_title = None
         self.window_region = None  # (left, top, width, height)
@@ -119,15 +119,45 @@ class CalibratorApp:
         self.entry_title.pack(side=tk.LEFT, padx=5)
         self.entry_title.bind("<Return>", lambda e: self._search_and_locate())
         ttk.Button(top, text="🔍 定位窗口", command=self._search_and_locate).pack(side=tk.LEFT, padx=2)
-        ttk.Button(top, text="🔄 列出全部", command=self._list_all).pack(side=tk.LEFT, padx=2)
+        self.btn_list = ttk.Button(top, text="🔄 列出全部", command=self._toggle_list)
+        self.btn_list.pack(side=tk.LEFT, padx=2)
         self.lbl_win_status = ttk.Label(top, text="未定位", foreground="red")
         self.lbl_win_status.pack(side=tk.LEFT, padx=15)
 
-        # ── 中部：鼠标坐标 ──
-        coord_frame = ttk.LabelFrame(self.root, text="鼠标位置", padding=10)
-        coord_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+        # ── 窗口列表（内联，默认隐藏）──
+        self._list_frame = ttk.LabelFrame(self.root, text="窗口列表（双击选择）", padding=5)
+        list_top = ttk.Frame(self._list_frame)
+        list_top.pack(fill=tk.X, pady=(0, 3))
+        ttk.Label(list_top, text="过滤:").pack(side=tk.LEFT)
+        self.entry_filter = ttk.Entry(list_top, width=20)
+        self.entry_filter.pack(side=tk.LEFT, padx=4)
+        self.entry_filter.bind("<KeyRelease>", lambda e: self._refresh_list())
+        ttk.Button(list_top, text="🔄 刷新", command=self._refresh_list, width=6).pack(side=tk.LEFT, padx=2)
+        self.lbl_list_count = ttk.Label(list_top, text="", foreground="#888")
+        self.lbl_list_count.pack(side=tk.LEFT, padx=8)
 
-        row1 = ttk.Frame(coord_frame)
+        lb_frame = ttk.Frame(self._list_frame)
+        lb_frame.pack(fill=tk.BOTH, expand=True)
+        self._win_listbox = tk.Listbox(lb_frame, font=("Consolas", 9), height=8)
+        self._win_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        list_scroll = ttk.Scrollbar(lb_frame, orient=tk.VERTICAL, command=self._win_listbox.yview)
+        self._win_listbox.configure(yscrollcommand=list_scroll.set)
+        list_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._win_listbox.bind("<Double-Button-1>", lambda e: self._on_list_select())
+
+        btn_frame = ttk.Frame(self._list_frame)
+        btn_frame.pack(fill=tk.X, pady=(3, 0))
+        ttk.Button(btn_frame, text="确认选中", command=self._on_list_select).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="隐藏列表 ▲", command=self._hide_list).pack(side=tk.RIGHT)
+
+        self._all_windows = []  # 缓存窗口列表
+        self._list_visible = False
+
+        # ── 中部：鼠标坐标 ──
+        self._coord_frame = ttk.LabelFrame(self.root, text="鼠标位置", padding=10)
+        self._coord_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+
+        row1 = ttk.Frame(self._coord_frame)
         row1.pack(fill=tk.X)
         ttk.Label(row1, text="屏幕绝对坐标:", width=14).pack(side=tk.LEFT)
         self.lbl_abs = ttk.Label(row1, text="( — , — )", font=("Consolas", 11, "bold"), foreground="#333")
@@ -136,7 +166,7 @@ class CalibratorApp:
         self.lbl_rel = ttk.Label(row1, text="( — , — )", font=("Consolas", 11, "bold"), foreground="#0066cc")
         self.lbl_rel.pack(side=tk.LEFT, padx=5)
 
-        btn_row = ttk.Frame(coord_frame)
+        btn_row = ttk.Frame(self._coord_frame)
         btn_row.pack(fill=tk.X, pady=(8, 0))
         self.btn_track = ttk.Button(btn_row, text="▶ 开始追踪鼠标", command=self._toggle_tracking)
         self.btn_track.pack(side=tk.LEFT)
@@ -166,6 +196,8 @@ class CalibratorApp:
                    command=self._preview_roi).pack(side=tk.LEFT, padx=5)
         ttk.Button(input_row, text="🔲 网格检测",
                    command=self._grid_detect_roi).pack(side=tk.LEFT, padx=2)
+        ttk.Button(input_row, text="📊 属性检测",
+                   command=self._attr_detect_roi).pack(side=tk.LEFT, padx=2)
         if OCR_AVAILABLE:
             ttk.Button(input_row, text="🔤 OCR识别",
                        command=self._ocr_roi).pack(side=tk.LEFT, padx=2)
@@ -182,9 +214,6 @@ class CalibratorApp:
             ttk.Label(fill_row, text="  快捷键: F1=左上  F2=右下",
                       foreground="#888888", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, padx=5)
 
-        # ── 窗口列表弹窗 ──
-        self._list_dialog = None
-
     # ── 窗口定位 ──────────────────────────────────────
 
     def _search_and_locate(self):
@@ -193,7 +222,7 @@ class CalibratorApp:
             return
         keyword = self.entry_title.get().strip()
         if not keyword:
-            self._list_all()
+            self._show_list()
             return
         windows = gw.getWindowsWithTitle(keyword)
         if not windows:
@@ -201,40 +230,64 @@ class CalibratorApp:
             return
         self._use_window(windows[0])
 
-    def _list_all(self):
+    def _load_all_windows(self):
+        """加载所有窗口列表（缓存）"""
+        if not HAS_PYGETWINDOW:
+            self._all_windows = []
+            return
+        self._all_windows = [w for w in gw.getAllWindows()
+                             if w.title.strip() and w.width > 100 and w.height > 100]
+        self._all_windows.sort(key=lambda w: w.title)
+
+    def _toggle_list(self):
+        """切换窗口列表显示/隐藏"""
+        if self._list_visible:
+            self._hide_list()
+        else:
+            self._show_list()
+
+    def _show_list(self):
+        """显示内联窗口列表"""
         if not HAS_PYGETWINDOW:
             return
-        windows = [w for w in gw.getAllWindows()
-                   if w.title.strip() and w.width > 100 and w.height > 100]
-        windows.sort(key=lambda w: w.title)
+        self._load_all_windows()
+        self._list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 5),
+                              before=self._coord_frame)
+        self._list_visible = True
+        self.btn_list.configure(text="🔄 隐藏列表")
+        self._refresh_list()
 
-        if self._list_dialog and self._list_dialog.winfo_exists():
-            self._list_dialog.destroy()
+    def _hide_list(self):
+        """隐藏内联窗口列表"""
+        self._list_frame.pack_forget()
+        self._list_visible = False
+        self.btn_list.configure(text="🔄 列出全部")
 
-        dlg = tk.Toplevel(self.root)
-        dlg.title("选择窗口")
-        dlg.geometry("600x400")
-        dlg.transient(self.root)
-        self._list_dialog = dlg
-
-        lb = tk.Listbox(dlg, font=("Consolas", 9))
-        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
-        scroll = ttk.Scrollbar(dlg, orient=tk.VERTICAL, command=lb.yview)
-        lb.configure(yscrollcommand=scroll.set)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y, pady=10)
-
-        for w in windows:
+    def _refresh_list(self):
+        """刷新列表显示（支持过滤）"""
+        self._load_all_windows()
+        self._win_listbox.delete(0, tk.END)
+        keyword = self.entry_filter.get().strip().lower()
+        count = 0
+        for w in self._all_windows:
+            if keyword and keyword not in w.title.lower():
+                continue
             title = w.title[:70]
-            lb.insert(tk.END, f"{title:<72} {w.width}×{w.height}  @({w.left},{w.top})")
+            self._win_listbox.insert(tk.END, f"{title:<72} {w.width}×{w.height}  @({w.left},{w.top})")
+            count += 1
+        self.lbl_list_count.configure(text=f"{count}/{len(self._all_windows)} 个窗口")
 
-        def on_select():
-            sel = lb.curselection()
-            if sel and sel[0] < len(windows):
-                self._use_window(windows[sel[0]])
-                dlg.destroy()
-
-        lb.bind("<Double-Button-1>", lambda e: on_select())
-        ttk.Button(dlg, text="确认使用选中窗口", command=on_select).pack(pady=(0, 10))
+    def _on_list_select(self):
+        """用户双击或点击确认后选中窗口"""
+        sel = self._win_listbox.curselection()
+        if not sel:
+            return
+        keyword = self.entry_filter.get().strip().lower()
+        matched = [w for w in self._all_windows
+                   if not keyword or keyword in w.title.lower()]
+        if sel[0] < len(matched):
+            self._use_window(matched[sel[0]])
+            self._hide_list()
 
     def _use_window(self, w):
         if w.isMinimized:
@@ -364,8 +417,7 @@ class CalibratorApp:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
         window_name = f"ROI Preview: ({x},{y}) {w}x{h}  [press any key to close]"
-        cv2.imshow(window_name, frame)
-        cv2.waitKey(0)
+        self._show_scaled(window_name, frame)
         cv2.destroyAllWindows()
 
     def _grid_detect_roi(self):
@@ -472,9 +524,64 @@ class CalibratorApp:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
 
         title = f"Grid: {detected_count} detected + {len(cells)-detected_count} filled = {len(cells)} total  [press any key]"
-        cv2.imshow(title, viz)
+        self._show_scaled(title, viz)
+        cv2.destroyAllWindows()
+
+    def _show_scaled(self, title, img, min_size=200):
+        """自动放大过小的图像后显示"""
+        h, w = img.shape[:2]
+        if w < min_size or h < min_size:
+            scale = max(min_size / w, min_size / h)
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+        cv2.imshow(title, img)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
+
+    def _attr_detect_roi(self):
+        """对选定区域执行属性检测（与 getconfig 一致：白像素判定 2/3 属性 + 分划）"""
+        if not self.window_region or not HAS_MSS:
+            messagebox.showinfo("提示", "请先定位窗口")
+            return
+        roi = self._get_roi_coords()
+        if roi is None:
+            return
+
+        x, y, w, h = roi
+        win_l, win_t = self.window_region[0], self.window_region[1]
+
+        monitor = {"left": win_l + x, "top": win_t + y, "width": w, "height": h}
+        img = self._sct.grab(monitor)
+        arr = np.array(img)
+        frame = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+        roi_h, roi_w = frame.shape[:2]
+
+        # 底部 15px 白像素判定属性数量
+        strip_h = min(15, roi_h)
+        bottom = frame[-strip_h:, :, :]
+        white = cv2.inRange(bottom, (200, 200, 200), (255, 255, 255))
+        ratio = np.sum(white) / 255 / (strip_h * roi_w)
+        num_attrs = 2 if ratio > 0.10 else 3
+
+        # 分划方案（像素区间）
+        layout = {"2": [[0, 15], [45, 60]], "3": [[0, 15], [25, 40], [70, 85]]}
+        scheme = layout[str(num_attrs)]
+
+        # 可视化
+        viz = frame.copy()
+        cv2.rectangle(viz, (0, 0), (w - 1, h - 1), (0, 255, 0), 2)
+
+        for i in range(num_attrs):
+            y1, y2 = scheme[i]
+            y1 = max(0, min(y1, roi_h))
+            y2 = max(y1 + 1, min(y2, roi_h))
+            cv2.rectangle(viz, (0, y1), (roi_w - 1, y2), (0, 255, 255), 1)
+            cv2.putText(viz, f"attr{i+1} ({y1}-{y2})", (5, (y1 + y2) // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+
+        cv2.putText(viz, f"Mode: {num_attrs}attrs  white:{ratio:.1%}",
+                    (5, roi_h - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 255), 1)
+
+        self._show_scaled(f"Attr Detect: {num_attrs} attrs (white={ratio:.0%})", viz)
 
     def _export_roi(self):
         """导出区域坐标为 JSON 片段"""
@@ -581,8 +688,7 @@ class CalibratorApp:
             result = raw
 
         window_name = f"OCR: {display if display else '(empty)'}  [press any key]"
-        cv2.imshow(window_name, combined)
-        cv2.waitKey(0)
+        self._show_scaled(window_name, combined)
         cv2.destroyAllWindows()
 
         # 也输出到剪贴板

@@ -6,7 +6,7 @@ ZMDset — 游戏装备自动识别工具 (getconfig)
 功能：
   1. 捕获游戏窗口截图（mss）
   2. 图像处理检测仓库装备网格（OpenCV 二值化 + 轮廓检测）
-  3. 自动点击遍历装备（pyautogui）
+  3. 自动点击遍历装备（Interception 驱动）
   4. 识别装备属性等级（蓝色斜线计数 → a/b/c 值）
   5. OCR 识别装备名称（Tesseract，可选）
   6. 生成临时配置，审核后合并到 setConfig.json
@@ -18,7 +18,7 @@ ZMDset — 游戏装备自动识别工具 (getconfig)
   - 支持多分辨率切换（用户从预设列表中选择）
 
 依赖安装：
-  pip install opencv-python numpy mss pyautogui pillow pytesseract
+  pip install opencv-python numpy mss pillow pytesseract
 
 用法：
   python getconfig.py          # 启动 GUI
@@ -45,12 +45,6 @@ try:
     HAS_MSS = True
 except ImportError:
     HAS_MSS = False
-
-try:
-    import pyautogui
-    HAS_PYAUTOGUI = True
-except ImportError:
-    HAS_PYAUTOGUI = False
 
 try:
     import pygetwindow as gw
@@ -317,35 +311,25 @@ class GridDetector:
 class AttributeRecognizer:
     """
     识别装备详情面板中的属性等级。
-    原理：蓝色斜线代表等级（// 表示2级，/// 表示3级）。
-    每条属性有 0~3 条斜线，装备通常有 3 条属性（少数2条）。
-
-    方法：HSV 蓝色过滤 → 将属性区域按行分割 → 每行按列三等分 →
-          统计每个格子的蓝色像素 → 超过阈值认为存在斜线 → 计数
+    1. 底部 15px 检测白色像素占比 → 判断 2 属性还是 3 属性
+    2. 按 attr_layout 方案划分属性行
+    3. 每行三列检测蓝色像素 → 得到 a/b/c 等级
     """
 
     def __init__(self, detail_cfg, color_cfg):
-        """
-        detail_cfg: resolution_config.json 中 resolution.detail 节
-        color_cfg:  resolution_config.json 中 resolution.color 节
-        """
         self.attr_x = detail_cfg["attr_x"]
         self.attr_y = detail_cfg["attr_y"]
         self.attr_w = detail_cfg["attr_w"]
         self.attr_h = detail_cfg["attr_h"]
-
+        self.attr_layout = detail_cfg.get("attr_layout", {
+            "2": [[0, 38], [38, 72]],
+            "3": [[0, 28], [28, 56], [56, 85]]
+        })
         self.blue_lower = np.array(color_cfg["blue_lower"])
         self.blue_upper = np.array(color_cfg["blue_upper"])
         self.slash_min_pixels = color_cfg.get("slash_min_pixels", 15)
 
-    def recognize(self, frame_bgr, num_attrs=3):
-        """
-        从截图中识别属性等级。
-        frame_bgr: 游戏窗口截图的 BGR numpy 数组
-        num_attrs: 预期属性条数（通常为 3，少数装备为 2）
-        返回: [a, b, c] 各属性等级（0-3），如 [2, 3, 1] 表示 a=2, b=3, c=1
-        """
-        # 裁剪属性区域
+    def recognize(self, frame_bgr):
         h, w = frame_bgr.shape[:2]
         x1 = max(0, self.attr_x)
         y1 = max(0, self.attr_y)
@@ -356,54 +340,66 @@ class AttributeRecognizer:
             return [0, 0, 0]
 
         attr_roi = frame_bgr[y1:y2, x1:x2]
+        roi_h, roi_w = attr_roi.shape[:2]
+
+        # 判断属性数量：底部 15px 白色占比
+        num_attrs = self._detect_attr_count(attr_roi)
 
         # HSV 蓝色过滤
         hsv = cv2.cvtColor(attr_roi, cv2.COLOR_BGR2HSV)
         blue_mask = cv2.inRange(hsv, self.blue_lower, self.blue_upper)
 
-        # 形态学去噪
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
         blue_mask = cv2.morphologyEx(blue_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
         blue_mask = cv2.morphologyEx(blue_mask, cv2.MORPH_OPEN, kernel, iterations=1)
 
-        roi_h, roi_w = blue_mask.shape
-        row_h = max(1, roi_h // num_attrs)
-
+        # 按方案划分行（像素区间）
+        ranges = self.attr_layout.get(str(num_attrs), self.attr_layout["3"])
         levels = []
         for i in range(num_attrs):
-            row_start = i * row_h
-            row_end = min((i + 1) * row_h, roi_h)
+            row_start, row_end = ranges[i]
+            row_start = max(0, min(row_start, roi_h))
+            row_end = max(row_start + 1, min(row_end, roi_h))
             row_slice = blue_mask[row_start:row_end, :]
 
-            # 三列检测：每列是否有足够蓝色像素
             col_w = roi_w // 3
             slash_count = 0
             for j in range(3):
-                col_start = j * col_w
-                col_end = min((j + 1) * col_w, roi_w)
-                zone = row_slice[:, col_start:col_end]
-                blue_pixels = np.sum(zone) // 255
-                if blue_pixels >= self.slash_min_pixels:
+                cs = j * col_w
+                ce = min((j + 1) * col_w, roi_w)
+                zone = row_slice[:, cs:ce]
+                if np.sum(zone) // 255 >= self.slash_min_pixels:
                     slash_count += 1
 
-            # 双重验证：如果列检测为 0 或 3，用整体密度再确认
             if slash_count == 0:
-                total_blue = np.sum(row_slice) // 255
-                if total_blue > self.slash_min_pixels * 0.6:
-                    slash_count = 1  # 至少1级
+                total = np.sum(row_slice) // 255
+                if total > self.slash_min_pixels * 0.6:
+                    slash_count = 1
             elif slash_count == 3:
-                # 确认每列确实都有显著蓝色（防止噪点误判）
                 for j in range(3):
-                    col_start = j * col_w
-                    col_end = min((j + 1) * col_w, roi_w)
-                    zone = row_slice[:, col_start:col_end]
+                    cs = j * col_w
+                    ce = min((j + 1) * col_w, roi_w)
+                    zone = row_slice[:, cs:ce]
                     if np.sum(zone) // 255 < self.slash_min_pixels * 0.5:
                         slash_count = 2
                         break
 
             levels.append(min(slash_count, 3))
 
+        # 3 属性时直接返回；2 属性时补 0 占位
+        if num_attrs == 2:
+            levels.append(0)
         return levels
+
+    def _detect_attr_count(self, attr_roi):
+        """底部 15px 白色像素占比高 → 2 属性（有文字），否则 3 属性"""
+        roi_h = attr_roi.shape[0]
+        strip_h = min(15, roi_h)
+        bottom = attr_roi[-strip_h:, :, :]
+        # BGR 白色 (238,238,238) 有容差
+        white = cv2.inRange(bottom, (200, 200, 200), (255, 255, 255))
+        ratio = np.sum(white) / 255 / (strip_h * bottom.shape[1])
+        return 2 if ratio > 0.10 else 3
 
     def debug_visualize(self, frame_bgr, num_attrs=3):
         """返回用于调试的可视化图像（标注属性区域和识别结果）"""
@@ -428,17 +424,6 @@ class AttributeRecognizer:
 # ============================================================
 #  装备名称 OCR 模块（Tesseract）
 # ============================================================
-
-# 装备名称中出现的所有字符（中文 + 英文 + 数字 + 符号）
-_NAME_CHARS = (
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789·."
-    "壹贰叁肆伍陆柒捌玖拾型点剑潮涌脉冲生物辅助拓荒长息壤流落潮"
-    "旧锋碾骨清波纾难应龙动火悬河超域护甲护手护服手甲手套手环"
-    "工具组瞄具护板盾针接驳器校准器水罐印章供养栓供氧栓通信器"
-    "定位仪电力匣测温镜辅助臂蓄电核竹刃火石短棍腕带面具披巾"
-    "臂甲重甲轻甲胸甲装甲刺刃短刃定位信标雷达"
-    "ＭＩ"  # 全角字母（游戏可能使用）
-)
 
 # 自动检测 Tesseract 安装路径
 def _find_tesseract():
@@ -513,7 +498,7 @@ class NameRecognizer:
         _, binary = cv2.threshold(gray, thresh_val, 255, cv2.THRESH_BINARY)
 
         # Tesseract 识别
-        _BLACKLIST = "0123456789.,;:!?()[]{}'\"`~@#$%^&*_-+=/\\|<>·"
+        _BLACKLIST = "01.,;:!'\"`~@#$%^*_-+=/\\|<>·"
         try:
             text = pytesseract.image_to_string(
                 binary,
@@ -539,7 +524,7 @@ class NameRecognizer:
             if score > best_score:
                 best_score = score
                 best = c
-        return best if best_score >= 0.6 else raw_name
+        return best if best_score >= 0.65 else raw_name
 
 
 # ============================================================
@@ -595,7 +580,7 @@ class EquipmentScanner:
         self.capture = WindowCapture()
         self.grid_detector = GridDetector(self.cfg["grid"])
         self.attr_recognizer = AttributeRecognizer(self.cfg["detail"], self.cfg["color"])
-        self.name_recognizer = NameRecognizer(self.cfg["detail"], self.cfg.get("equipment_names"))
+        self.name_recognizer = NameRecognizer(self.cfg["detail"], res_cfg.data.get("equipment_names"))
         self.mouse = MouseController()
 
         # 回调
@@ -639,6 +624,11 @@ class EquipmentScanner:
                 self._log(f"🪟 窗口位置已变化: ({old_left},{old_top}) → ({new_left},{new_top})")
             self.window_offset = (new_left, new_top)
             self.capture.set_region(new_left, new_top, new_w, new_h)
+            # 激活窗口到前台
+            try:
+                w.activate()
+            except Exception:
+                pass
             return True
         except Exception:
             return False
@@ -659,6 +649,9 @@ class EquipmentScanner:
             return []
 
         self._log("📸 正在截图...")
+        # 确保游戏窗口在前台
+        self._refresh_window_position()
+        time.sleep(0.15)
         frame = self.capture.capture()
         self._log(f"   截图尺寸: {frame.shape[1]}x{frame.shape[0]}")
 
@@ -696,7 +689,7 @@ class EquipmentScanner:
 
             # 截图 → 识别属性
             frame_detail = self.capture.capture()
-            stats = self.attr_recognizer.recognize(frame_detail, num_attrs=3)
+            stats = self.attr_recognizer.recognize(frame_detail)
 
             # OCR 装备名称
             name = self.name_recognizer.recognize(frame_detail)
@@ -1291,7 +1284,7 @@ class ScannerApp:
 
         recognizer = AttributeRecognizer(cfg["detail"], cfg["color"])
         viz = recognizer.debug_visualize(frame, num_attrs=3)
-        stats = recognizer.recognize(frame, num_attrs=3)
+        stats = recognizer.recognize(frame)
 
         self._log(f"🔍 属性预览: a={stats[0]} b={stats[1]} c={stats[2]}")
 
@@ -1423,8 +1416,6 @@ def main():
     missing = []
     if not HAS_MSS:
         missing.append("mss")
-    if not HAS_PYAUTOGUI:
-        missing.append("pyautogui")
     if not HAS_TESSERACT:
         print("⚠️ 警告: 未安装 pytesseract，装备名称 OCR 功能将不可用")
         print("   安装: pip install pytesseract")
